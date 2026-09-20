@@ -174,6 +174,17 @@ def parse_project_data(raw: Any) -> ProjectSnapshot:
                     else str(item.get("group_id"))
                 ),
                 label=str(item.get("label", "")),
+                unit_id=(
+                    None
+                    if item.get("unit_id") in (None, "")
+                    else str(item.get("unit_id"))
+                ),
+                block_id=(
+                    None
+                    if item.get("block_id") in (None, "")
+                    else str(item.get("block_id"))
+                ),
+                origin=str(item.get("origin", "manual") or "manual"),
             )
         )
 
