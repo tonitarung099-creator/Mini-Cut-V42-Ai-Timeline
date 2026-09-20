@@ -86,6 +86,7 @@ class TimelineToolRegistry:
             self.history.rollback_checkpoint()
             return self._error(tool, "validation_error", str(exc))
 
+        self.history.commit_checkpoint()
         self.revision += 1
         return self._ok(tool, self._serialize_result(result))
 
@@ -125,6 +126,7 @@ class TimelineToolRegistry:
             self.history.rollback_checkpoint()
             return self._error("batch", "validation_error", str(exc))
 
+        self.history.commit_checkpoint()
         self.revision += 1
         return self._ok(
             "batch",
