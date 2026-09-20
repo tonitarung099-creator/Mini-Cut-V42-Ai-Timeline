@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 from uuid import uuid4
 
-from PySide6.QtCore import Qt, QTimer, QUrl
+from PySide6.QtCore import QElapsedTimer, Qt, QTimer, QUrl
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
@@ -64,6 +64,15 @@ class MiniCutMainWindow(QMainWindow):
         self.history = TimelineHistory(self.document)
         self.media_durations: dict[str, int] = {}
         self.current_media: str | None = None
+
+        # Preview has two contexts: source-bin preview and composed timeline preview.
+        self.preview_mode = "source"
+        self.preview_clip_id: str | None = None
+        self._timeline_playing = False
+        self._timeline_clock = QElapsedTimer()
+        self._timeline_timer = QTimer(self)
+        self._timeline_timer.setInterval(33)
+        self._timeline_timer.timeout.connect(self._timeline_tick)
 
         self.audio_output = QAudioOutput(self)
         self.player = QMediaPlayer(self)
@@ -257,6 +266,7 @@ class MiniCutMainWindow(QMainWindow):
         self.player.positionChanged.connect(self._player_position)
         self.player.durationChanged.connect(self._player_duration)
         self.player.playbackStateChanged.connect(self._playback_state_changed)
+        self.player.mediaStatusChanged.connect(self._media_status_changed)
 
     def import_media(self):
         files, _ = QFileDialog.getOpenFileNames(
@@ -285,9 +295,14 @@ class MiniCutMainWindow(QMainWindow):
         if not items:
             return
         path = str(items[0].data(Qt.ItemDataRole.UserRole))
+        self._stop_timeline_playback()
+        self.preview_mode = "source"
+        self.preview_clip_id = None
         self.current_media = path
+        self.player.setPlaybackRate(1.0)
         self.player.setSource(QUrl.fromLocalFile(path))
-        self.statusBar().showMessage(f"Preview: {Path(path).name}")
+        self._update_play_button()
+        self.statusBar().showMessage(f"Source preview: {Path(path).name}")
 
     def add_selected_to_timeline(self):
         items = self.media_list.selectedItems()
@@ -394,6 +409,12 @@ class MiniCutMainWindow(QMainWindow):
         self.timeline_status.setText(f"{len(self.document.clips)} clip")
         self.action_export.setEnabled(bool(self.document.clips))
         self._refresh_edit_actions()
+        if self.preview_mode == "timeline":
+            self._sync_timeline_preview(
+                self.timeline.playhead_ms,
+                autoplay=self._timeline_playing,
+                force_seek=True,
+            )
         if message:
             self.statusBar().showMessage(message)
 
@@ -405,38 +426,187 @@ class MiniCutMainWindow(QMainWindow):
         self.action_redo.setEnabled(self.history.can_redo)
 
     def toggle_play(self):
+        if self.preview_mode == "timeline":
+            if self._timeline_playing:
+                self._stop_timeline_playback()
+            else:
+                self._start_timeline_playback()
+            return
+
         if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
             self.player.pause()
         else:
             self.player.play()
 
-    def _player_duration(self, duration: int):
-        if self.current_media:
-            self.media_durations[self.current_media] = int(duration)
-        self._update_time_label(self.player.position(), duration)
+    def _start_timeline_playback(self):
+        if self.document.duration_ms <= 0:
+            self.statusBar().showMessage("Timeline masih kosong.")
+            return
 
-    def _player_position(self, position: int):
-        self.timeline.set_playhead(position)
-        self._update_time_label(position, self.player.duration())
+        self.preview_mode = "timeline"
+        if self.timeline.playhead_ms >= self.document.duration_ms:
+            self.timeline.set_playhead(0)
 
-    def _playback_state_changed(self, state):
-        self.play_button.setText(
-            "⏸ Pause"
-            if state == QMediaPlayer.PlaybackState.PlayingState
-            else "▶ Play"
+        self._timeline_playing = True
+        self._timeline_clock.restart()
+        self._timeline_timer.start()
+        self._sync_timeline_preview(
+            self.timeline.playhead_ms,
+            autoplay=True,
+            force_seek=True,
+        )
+        self._update_play_button()
+
+    def _stop_timeline_playback(self):
+        self._timeline_timer.stop()
+        self._timeline_playing = False
+        self.player.pause()
+        self._update_play_button()
+
+    def _timeline_tick(self):
+        if not self._timeline_playing:
+            return
+
+        elapsed_ms = max(1, self._timeline_clock.restart())
+        next_ms = self.timeline.playhead_ms + elapsed_ms
+        if next_ms >= self.document.duration_ms:
+            self.timeline.set_playhead(self.document.duration_ms)
+            self._update_timeline_time_label()
+            self._sync_timeline_preview(
+                self.document.duration_ms,
+                autoplay=False,
+                force_seek=False,
+            )
+            self._stop_timeline_playback()
+            return
+
+        self.timeline.set_playhead(next_ms)
+        self._update_timeline_time_label()
+        self._sync_timeline_preview(
+            next_ms,
+            autoplay=True,
+            force_seek=False,
         )
 
+    def _sync_timeline_preview(
+        self,
+        timeline_ms: int,
+        *,
+        autoplay: bool,
+        force_seek: bool,
+    ):
+        clip = self.document.video_clip_at(timeline_ms)
+        if clip is None:
+            if self.preview_clip_id is not None or not self.player.source().isEmpty():
+                self.player.pause()
+                self.player.setSource(QUrl())
+            self.preview_clip_id = None
+            self._update_timeline_time_label()
+            return
+
+        expected_source_ms = clip.source_position_at(timeline_ms)
+        current_source = self.player.source().toLocalFile()
+        source_changed = current_source != clip.source or self.preview_clip_id != clip.id
+
+        self.preview_clip_id = clip.id
+        self.player.setPlaybackRate(clip.speed)
+
+        if source_changed:
+            self.player.setSource(QUrl.fromLocalFile(clip.source))
+            self.player.setPosition(expected_source_ms)
+        elif force_seek or abs(self.player.position() - expected_source_ms) > 250:
+            self.player.setPosition(expected_source_ms)
+
+        if autoplay:
+            self.player.play()
+        else:
+            self.player.pause()
+
+        self._update_timeline_time_label()
+
+    def _player_duration(self, duration: int):
+        source_path = self.player.source().toLocalFile()
+        if source_path:
+            self.media_durations[source_path] = int(duration)
+
+        if self.preview_mode == "timeline":
+            self._update_timeline_time_label()
+        else:
+            self._update_time_label(self.player.position(), duration)
+
+    def _player_position(self, position: int):
+        if self.preview_mode == "timeline":
+            # The timeline clock owns the playhead; QMediaPlayer only renders
+            # the resolved source segment.
+            return
+        self._update_time_label(position, self.player.duration())
+
+    def _media_status_changed(self, status):
+        if self.preview_mode != "timeline" or self.preview_clip_id is None:
+            return
+        if status not in (
+            QMediaPlayer.MediaStatus.LoadedMedia,
+            QMediaPlayer.MediaStatus.BufferedMedia,
+        ):
+            return
+
+        try:
+            clip = self.document.clip(self.preview_clip_id)
+            if not clip.covers_timeline_time(self.timeline.playhead_ms):
+                return
+            self.player.setPlaybackRate(clip.speed)
+            self.player.setPosition(
+                clip.source_position_at(self.timeline.playhead_ms)
+            )
+            if self._timeline_playing:
+                self.player.play()
+        except (KeyError, ValueError):
+            return
+
+    def _playback_state_changed(self, state):
+        self._update_play_button()
+
+    def _update_play_button(self):
+        if self.preview_mode == "timeline":
+            playing = self._timeline_playing
+        else:
+            playing = (
+                self.player.playbackState()
+                == QMediaPlayer.PlaybackState.PlayingState
+            )
+        self.play_button.setText("⏸ Pause" if playing else "▶ Play")
+
     def _timeline_seek(self, milliseconds: int):
-        if self.current_media:
-            self.player.setPosition(milliseconds)
+        self.preview_mode = "timeline"
+        if self._timeline_playing:
+            self._timeline_clock.restart()
+        self._sync_timeline_preview(
+            milliseconds,
+            autoplay=self._timeline_playing,
+            force_seek=True,
+        )
+        self._update_play_button()
+
+    def _update_timeline_time_label(self):
+        self.time_label.setText(
+            f"{self._clock(self.timeline.playhead_ms)} / "
+            f"{self._clock(self.document.duration_ms)}"
+        )
 
     def _clip_selected(self, clip_id: str):
+        self.preview_mode = "timeline"
         clip = self.document.clip(clip_id)
         self.inspector_source.setText(Path(clip.source).name)
         self.inspector_track.setText(clip.track_id)
         self.inspector_in.setText(self._clock(clip.source_in_ms))
         self.inspector_out.setText(self._clock(clip.source_out_ms))
         self.inspector_speed.setText(f"{clip.speed:.2f}×")
+        self._sync_timeline_preview(
+            self.timeline.playhead_ms,
+            autoplay=self._timeline_playing,
+            force_seek=False,
+        )
+        self._update_play_button()
         self._refresh_edit_actions()
 
     def _clear_inspector(self):
@@ -480,6 +650,7 @@ class MiniCutMainWindow(QMainWindow):
         assert self.video is not None
         assert self.findChild(QDockWidget, "AIAgentDock") is not None
         assert self.history.document is self.document
+        assert self._timeline_timer.interval() == 33
         self.statusBar().showMessage("SELF TEST PASS")
 
 
