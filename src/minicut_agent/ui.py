@@ -240,6 +240,7 @@ class MiniCutMainWindow(QMainWindow):
         self.timeline.clipSelected.connect(self._clip_selected)
         self.timeline.clipMoveRequested.connect(self._move_clip_requested)
         self.timeline.clipTrimRequested.connect(self._trim_clip_requested)
+        self.timeline.trackControlRequested.connect(self._track_control_requested)
 
     def _build_ai_dock(self):
         dock = QDockWidget("AI Agent", self)
@@ -301,6 +302,7 @@ class MiniCutMainWindow(QMainWindow):
         self.preview_clip_id = None
         self.current_media = path
         self.player.setPlaybackRate(1.0)
+        self.audio_output.setMuted(False)
         self.player.setSource(QUrl.fromLocalFile(path))
         self._update_play_button()
         self.statusBar().showMessage(f"Source preview: {Path(path).name}")
@@ -406,6 +408,28 @@ class MiniCutMainWindow(QMainWindow):
         self._clip_selected(clip_id)
         side = "kiri" if edge == "left" else "kanan"
         self._timeline_changed(f"Trim {side} berhasil.")
+
+    def _track_control_requested(self, track_id: str, control: str):
+        try:
+            self.history.checkpoint()
+            if control == "lock":
+                state = self.document.toggle_track_lock(track_id)
+                message = f"{track_id} {'dikunci' if state else 'dibuka'}."
+            elif control == "visibility":
+                state = self.document.toggle_track_visibility(track_id)
+                message = f"{track_id} {'ditampilkan' if state else 'disembunyikan'}."
+            elif control == "mute":
+                state = self.document.toggle_track_mute(track_id)
+                message = f"{track_id} {'mute' if state else 'audio aktif'}."
+            else:
+                raise ValueError(f"Kontrol track tidak dikenal: {control}")
+        except (ValueError, KeyError) as exc:
+            self.history.cancel_checkpoint()
+            self.statusBar().showMessage(str(exc))
+            self._refresh_edit_actions()
+            return
+
+        self._timeline_changed(message)
 
     def undo_timeline(self):
         if self.history.undo():
@@ -520,6 +544,7 @@ class MiniCutMainWindow(QMainWindow):
                 self.player.pause()
                 self.player.setSource(QUrl())
             self.preview_clip_id = None
+            self.audio_output.setMuted(False)
             self._update_timeline_time_label()
             return
 
@@ -529,6 +554,9 @@ class MiniCutMainWindow(QMainWindow):
 
         self.preview_clip_id = clip.id
         self.player.setPlaybackRate(clip.speed)
+        self.audio_output.setMuted(
+            self.document.audio_muted_for_video_clip(clip.id, timeline_ms)
+        )
 
         if source_changed:
             self.player.setSource(QUrl.fromLocalFile(clip.source))

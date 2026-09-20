@@ -238,6 +238,50 @@ class TimelineDocumentTests(unittest.TestCase):
         self.assertIs(doc.video_clip_at(1000), lower)
         self.assertIsNot(doc.video_clip_at(1000), upper)
 
+    def test_track_controls_toggle_state(self):
+        doc = TimelineDocument.default()
+        self.assertTrue(doc.toggle_track_lock("V1"))
+        self.assertFalse(doc.toggle_track_visibility("V1"))
+        self.assertTrue(doc.toggle_track_mute("A1"))
+        self.assertTrue(doc.track("V1").locked)
+        self.assertFalse(doc.track("V1").visible)
+        self.assertTrue(doc.track("A1").muted)
+
+    def test_muted_linked_audio_is_resolved_for_preview(self):
+        doc = TimelineDocument.default()
+        video = doc.insert_clip(
+            source="film.mp4",
+            track_id="V1",
+            source_in_ms=0,
+            source_out_ms=5000,
+            timeline_start_ms=0,
+            group_id="g1",
+        )
+        doc.insert_clip(
+            source="film.mp4",
+            track_id="A1",
+            source_in_ms=0,
+            source_out_ms=5000,
+            timeline_start_ms=0,
+            group_id="g1",
+        )
+        self.assertFalse(doc.audio_muted_for_video_clip(video.id, 1000))
+        doc.toggle_track_mute("A1")
+        self.assertTrue(doc.audio_muted_for_video_clip(video.id, 1000))
+
+    def test_locked_track_rejects_trim(self):
+        doc = TimelineDocument.default()
+        clip = doc.insert_clip(
+            source="film.mp4",
+            track_id="V1",
+            source_in_ms=0,
+            source_out_ms=5000,
+            timeline_start_ms=0,
+        )
+        doc.toggle_track_lock("V1")
+        with self.assertRaises(ValueError):
+            doc.trim_linked(clip.id, edge="right", timeline_ms=3000)
+
     def test_history_cancel_checkpoint_removes_rejected_operation(self):
         doc = TimelineDocument.default()
         history = TimelineHistory(doc)
