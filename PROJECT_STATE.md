@@ -13,7 +13,8 @@
 - Shared Timeline Tool Registry: VERIFIED.
 - Localhost timeline bridge + timeline-native MCP: VERIFIED.
 - Desktop + MCP Windows EXE packaging: VERIFIED.
-- Project save/load + autosave + durable V42 checkpoints: IMPLEMENTED in current milestone; CI verification required.
+- Project save/load + autosave + durable V42 checkpoints: MERGED; verification retained in CI history.
+- Review-first AI Plan / Review / Apply layer: IMPLEMENTED in current milestone; CI verification required.
 - 1B2 candidate/shot verification engine: NOT STARTED.
 - Gemini multi-key manager/failover reconstruction: NOT STARTED.
 - V42 Prompt 2–5 workflow engine: NOT STARTED.
@@ -21,19 +22,19 @@
 
 ## Architecture rule
 
-The timeline is the single source of truth. Human editing, MCP, and future Gemini editing all use the same validated Timeline Tool Registry. Project loading restores the same TimelineDocument object in place, preserving all live references.
+The timeline is the single source of truth. Manual edits and reviewed AI edits share the same validated Timeline Tool Registry. External AI can inspect state and propose a structured plan, but cannot bypass review with direct timeline mutation.
 
 ## Current milestone
 
-The project format persists tracks, clips, revision, playhead, imported media and provider-independent V42 state/checkpoints. Once a project has a path, timeline changes from the UI or local AI/MCP bridge autosave to that project.
+AI/MCP can submit a revision-bound plan containing validated timeline actions. The app displays the plan in the right-side AI Agent panel. Apply revalidates the plan and executes it atomically; Cancel changes nothing. Successful V42 plan application records workflow/checkpoint metadata.
 
 ## Next technically justified action
 
-After project persistence CI passes:
+After AI Plan / Review / Apply CI passes:
 
-1. add a structured AI Plan / Review / Apply layer over the Timeline Tool Registry,
-2. parse 1B2 into structured B/N/J units and candidate ranges,
-3. add local camera-cut detection only inside the current 1B2 candidate ranges,
-4. sample sparse frames + overlapping film SRT into compact evidence packets,
-5. reconstruct Gemini multi-key/failover against those evidence packets,
-6. implement Prompt 2–5 orchestration and final export.
+1. parse 1B2 into structured B/N/J units and candidate ranges,
+2. add local camera-cut detection only inside those candidate ranges,
+3. sample sparse frames and overlapping film SRT into compact evidence packets,
+4. reconstruct Gemini multi-key/failover against those packets,
+5. implement Prompt 2–5 orchestration against the shared timeline,
+6. reconstruct final FFmpeg/SmartCut export.
