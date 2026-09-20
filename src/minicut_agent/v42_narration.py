@@ -12,8 +12,14 @@ from typing import Any, Callable, Iterable, Sequence
 
 from .evidence_packets import SubtitleCue, load_srt
 from .shot_detection import find_ffmpeg
+from .timeline_model import TimelineDocument
 from .v42_1b2 import V42OneB2Plan
-from .v42_regions import display_sequence
+from .v42_regions import (
+    V42RegionError,
+    build_reflow_actions,
+    compute_region_layout,
+    display_sequence,
+)
 
 FINAL_SECTION_RE = re.compile(
     r"NASKAH\s+BERSIH\s+FINAL\s*[—–-]?\s*SUMBER\s+AUDIO\s+NARASI",
@@ -557,6 +563,100 @@ def refine_safe_padding(
         boundary_method=f"{pre_method}/{post_method}",
         warning="; ".join(warning_parts),
     )
+
+
+def build_narration_audio_plan(
+    *,
+    plan: V42OneB2Plan,
+    timing_set: NarrationTimingSet,
+    document: TimelineDocument,
+    unit_id: str,
+    expected_revision: int,
+) -> dict[str, Any]:
+    unit_id = str(unit_id).upper()
+    unit = plan.units.get(unit_id)
+    if unit is None or unit.kind != "narration":
+        raise NarrationMappingError(f"Unit narasi tidak valid: {unit_id}.")
+    timing = timing_set.timings.get(unit_id)
+    if timing is None:
+        raise NarrationMappingError(
+            f"Timing audio final belum tersedia untuk {unit_id}."
+        )
+    if timing.duration_ms <= 0:
+        raise NarrationMappingError(f"Durasi audio {unit_id} tidak valid.")
+
+    try:
+        track = document.track("A2")
+    except KeyError as exc:
+        raise NarrationMappingError("Track A2 tidak tersedia.") from exc
+    if track.locked:
+        raise NarrationMappingError("Track A2 sedang dikunci.")
+
+    existing = [
+        clip
+        for clip in document.clips
+        if clip.unit_id == unit_id and clip.track_id == "A2"
+    ]
+    if existing:
+        raise NarrationMappingError(
+            f"{unit_id} sudah memiliki audio narasi di A2; "
+            "gunakan workflow revisi untuk menggantinya."
+        )
+
+    overrides = timing_set.duration_overrides()
+    layout = compute_region_layout(
+        plan,
+        document,
+        duration_overrides=overrides,
+    )
+    try:
+        region = layout.region(unit_id)
+        reflow = build_reflow_actions(
+            document,
+            layout,
+            exclude_unit_ids={unit_id},
+        )
+    except (KeyError, V42RegionError) as exc:
+        raise NarrationMappingError(str(exc)) from exc
+
+    actions = list(reflow)
+    actions.append(
+        {
+            "tool": "insert_clip",
+            "args": {
+                "source": timing_set.audio_path,
+                "track_id": "A2",
+                "source_in_ms": timing.source_in_ms,
+                "source_out_ms": timing.source_out_ms,
+                "timeline_start_ms": region.start_ms,
+                "speed": 1.0,
+                "muted": False,
+                "group_id": f"v42-{unit_id}-narration-audio",
+                "label": f"{unit_id} · audio narasi final",
+                "unit_id": unit_id,
+                "block_id": unit.block_id,
+                "origin": "narration_audio",
+            },
+        }
+    )
+
+    return {
+        "title": f"Pasang audio narasi {unit_id} di A2",
+        "expected_revision": int(expected_revision),
+        "block_id": unit.block_id,
+        "unit_id": unit_id,
+        "created_by": "prompt3-narration-audio",
+        "explanation": (
+            f"Audio {unit_id} memakai source "
+            f"{timing.source_in_ms / 1000:.3f}s–"
+            f"{timing.source_out_ms / 1000:.3f}s setelah safe padding waveform "
+            f"({timing.pre_padding_ms} ms sebelum, "
+            f"{timing.post_padding_ms} ms sesudah). "
+            f"Durasi final {timing.duration_ms / 1000:.3f}s menjadi durasi "
+            f"authoritative region N. {len(reflow)} action reflow diperlukan."
+        ),
+        "actions": actions,
+    }
 
 
 def parse_silencedetect(
