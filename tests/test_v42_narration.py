@@ -79,6 +79,19 @@ Kemudian ia membuka berkas rahasia di meja.
         self.assertTrue(all(item.method == "explicit-id" for item in mapped))
         self.assertEqual((mapped[0].core_start_ms, mapped[0].core_end_ms), (1000, 3000))
 
+    def test_explicit_id_segment_includes_unlabeled_continuation_cues(self):
+        cues = [
+            SubtitleCue(1000, 1700, "N-001: Pada pagi hari", 1),
+            SubtitleCue(1700, 3000, "Toni masuk ke kantor.", 2),
+            SubtitleCue(4000, 5200, "N-002: Kemudian ia membuka", 3),
+            SubtitleCue(5200, 7000, "berkas rahasia di meja.", 4),
+        ]
+        mapped = map_narration_cues(self.script(), cues, self.plan())
+        self.assertEqual([item.cue_indexes for item in mapped], [[1, 2], [3, 4]])
+        self.assertTrue(all(item.method == "explicit-id" for item in mapped))
+        self.assertEqual(mapped[0].core_end_ms, 3000)
+        self.assertEqual(mapped[1].core_end_ms, 7000)
+
     def test_unlabeled_srt_is_grouped_monotonically_by_text(self):
         cues = [
             SubtitleCue(1000, 1800, "Pada pagi hari", 1),
