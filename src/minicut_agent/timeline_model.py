@@ -242,6 +242,49 @@ class TimelineDocument:
         self._sort_clips()
         return created
 
+    def trim_linked(self, clip_id: str, *, edge: str, timeline_ms: int) -> list[TimelineClip]:
+        """Trim a selected clip and its linked A/V partners inward.
+
+        This first trim implementation intentionally trims only inside the
+        current clip bounds. Extending beyond the current source range will be
+        added later when source-handle bounds are persisted explicitly.
+        """
+        if edge not in {"left", "right"}:
+            raise ValueError("edge harus 'left' atau 'right'.")
+
+        selected = self.clip(clip_id)
+        targets = list(self.linked_clips(clip_id))
+        if selected.locked or any(
+            clip.locked or self.track(clip.track_id).locked for clip in targets
+        ):
+            raise ValueError("Clip atau track terkait sedang dikunci.")
+
+        if not selected.contains_timeline_time(timeline_ms):
+            raise ValueError("Posisi trim harus berada di dalam clip.")
+
+        if any(not clip.contains_timeline_time(timeline_ms) for clip in targets):
+            raise ValueError("Linked clip tidak sejajar pada posisi trim.")
+
+        if edge == "left":
+            for clip in targets:
+                delta_timeline = timeline_ms - clip.timeline_start_ms
+                source_delta = int(round(delta_timeline * clip.speed))
+                new_source_in = clip.source_in_ms + source_delta
+                if new_source_in >= clip.source_out_ms:
+                    raise ValueError("Trim kiri akan menghabiskan clip.")
+                clip.source_in_ms = new_source_in
+                clip.timeline_start_ms = int(timeline_ms)
+        else:
+            for clip in targets:
+                source_span = int(round((timeline_ms - clip.timeline_start_ms) * clip.speed))
+                new_source_out = clip.source_in_ms + source_span
+                if new_source_out <= clip.source_in_ms:
+                    raise ValueError("Trim kanan akan menghabiskan clip.")
+                clip.source_out_ms = min(new_source_out, clip.source_out_ms)
+
+        self._sort_clips()
+        return targets
+
     def clips_at(self, timeline_ms: int, *, kind: TrackKind | None = None) -> list[TimelineClip]:
         """Return visible clips covering timeline_ms ordered top-track first."""
         candidates: list[TimelineClip] = []
