@@ -10,30 +10,30 @@
 - Undo/redo with stable document identity: VERIFIED.
 - Timeline-aware preview with clip source-in/out and speed mapping: VERIFIED.
 - Track lock / video visibility / audio mute controls: VERIFIED.
-- Shared Timeline Tool Registry: VERIFIED by CI and merged.
-- Localhost timeline bridge + timeline-native MCP: IMPLEMENTED in current milestone; CI verification required.
-- Windows desktop EXE packaging: VERIFIED.
+- Shared Timeline Tool Registry: VERIFIED.
+- Localhost timeline bridge + timeline-native MCP: VERIFIED.
+- Desktop + MCP Windows EXE packaging: VERIFIED.
+- Project save/load + autosave + durable V42 checkpoints: IMPLEMENTED in current milestone; CI verification required.
 - 1B2 candidate/shot verification engine: NOT STARTED.
-- Project save/load + durable V42 checkpoints: NOT STARTED.
 - Gemini multi-key manager/failover reconstruction: NOT STARTED.
 - V42 Prompt 2–5 workflow engine: NOT STARTED.
 - Final FFmpeg/SmartCut export reconstruction: NOT STARTED.
 
 ## Architecture rule
 
-The timeline is the single source of truth. Human editing, MCP, and future Gemini editing all use the same validated Timeline Tool Registry. AI does not receive unrestricted project-file, shell, or FFmpeg mutation access.
+The timeline is the single source of truth. Human editing, MCP, and future Gemini editing all use the same validated Timeline Tool Registry. Project loading restores the same TimelineDocument object in place, preserving all live references.
 
 ## Current milestone
 
-The desktop starts a token-authenticated localhost-only bridge. External mutations are dispatched onto the Qt UI thread, checked against the timeline revision and locks, and reflected in the same visible timeline. The MCP companion exposes the new timeline-native tool surface.
+The project format persists tracks, clips, revision, playhead, imported media and provider-independent V42 state/checkpoints. Once a project has a path, timeline changes from the UI or local AI/MCP bridge autosave to that project.
 
 ## Next technically justified action
 
-After the local bridge + MCP CI gate passes:
+After project persistence CI passes:
 
-1. add project save/load with durable timeline revision/checkpoint metadata,
-2. add a structured AI plan/review layer on top of the Timeline Tool Registry,
-3. reconstruct 1B2 candidate-range parsing + local camera-cut verification,
-4. add Gemini multi-key/failover only after local evidence preparation is stable,
-5. implement Prompt 2–5 orchestration against the shared timeline,
-6. reconstruct final FFmpeg/SmartCut export.
+1. add a structured AI Plan / Review / Apply layer over the Timeline Tool Registry,
+2. parse 1B2 into structured B/N/J units and candidate ranges,
+3. add local camera-cut detection only inside the current 1B2 candidate ranges,
+4. sample sparse frames + overlapping film SRT into compact evidence packets,
+5. reconstruct Gemini multi-key/failover against those evidence packets,
+6. implement Prompt 2–5 orchestration and final export.
