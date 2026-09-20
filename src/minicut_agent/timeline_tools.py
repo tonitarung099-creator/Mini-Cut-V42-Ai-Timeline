@@ -178,6 +178,9 @@ class TimelineToolRegistry:
             group_id=args.get("group_id"),
             label=str(args.get("label", "")),
             clip_id=args.get("clip_id"),
+            unit_id=args.get("unit_id"),
+            block_id=args.get("block_id"),
+            origin=str(args.get("origin", "manual")),
         )
 
     def _move_clip(self, args: dict[str, Any]):

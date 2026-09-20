@@ -31,6 +31,9 @@ class TimelineClip:
     locked: bool = False
     group_id: str | None = None
     label: str = ""
+    unit_id: str | None = None
+    block_id: str | None = None
+    origin: str = "manual"
 
     @property
     def source_duration_ms(self) -> int:
@@ -110,6 +113,9 @@ class TimelineDocument:
         group_id: str | None = None,
         label: str = "",
         clip_id: str | None = None,
+        unit_id: str | None = None,
+        block_id: str | None = None,
+        origin: str = "manual",
     ) -> TimelineClip:
         track = self.track(track_id)
         if track.locked:
@@ -132,6 +138,9 @@ class TimelineDocument:
             muted=bool(muted),
             group_id=group_id,
             label=label or Path(source).name,
+            unit_id=(None if unit_id in (None, "") else str(unit_id)),
+            block_id=(None if block_id in (None, "") else str(block_id)),
+            origin=str(origin or "manual"),
         )
         self.clips.append(clip)
         self._sort_clips()
@@ -235,6 +244,9 @@ class TimelineDocument:
                 locked=False,
                 group_id=right_group,
                 label=clip.label,
+                unit_id=clip.unit_id,
+                block_id=clip.block_id,
+                origin=clip.origin,
             )
             self.clips.append(right)
             created.append(right)

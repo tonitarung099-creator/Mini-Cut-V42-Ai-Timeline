@@ -52,6 +52,7 @@ from .timeline_tools import TimelineToolRegistry
 from .timeline_view import TimelineView
 from .v42_1b2 import V42OneB2Plan, load_1b2
 from .v42_state import V42WorkflowState
+from .v42_verified_plan import V42PlanBuildError, build_verified_timeline_plan
 
 APP_TITLE = "MiniCut V42 AI Timeline"
 
@@ -451,6 +452,12 @@ class MiniCutMainWindow(QMainWindow):
         self.ai_verify_gemini.setEnabled(False)
         self.ai_verify_gemini.clicked.connect(self._verify_active_evidence_gemini)
 
+        self.ai_timeline_plan_status = QLabel("Timeline plan: belum dibuat")
+        self.ai_timeline_plan_status.setObjectName("StatusPill")
+        self.ai_build_timeline_plan = QPushButton("Buat AI Plan dari Gemini")
+        self.ai_build_timeline_plan.setEnabled(False)
+        self.ai_build_timeline_plan.clicked.connect(self._build_timeline_plan_from_gemini)
+
         self.ai_input = QPlainTextEdit()
         self.ai_input.setPlaceholderText(
             "Nanti: “Kerjakan B-001”, “Cari visual lain untuk N-007”, dll."
@@ -491,6 +498,8 @@ class MiniCutMainWindow(QMainWindow):
         layout.addWidget(self.ai_import_gemini_keys)
         layout.addWidget(self.ai_gemini_verify_status)
         layout.addWidget(self.ai_verify_gemini)
+        layout.addWidget(self.ai_timeline_plan_status)
+        layout.addWidget(self.ai_build_timeline_plan)
         layout.addWidget(self.ai_input)
         layout.addWidget(QLabel("AI Plan / Review"))
         layout.addWidget(self.ai_plan_view)
@@ -500,6 +509,7 @@ class MiniCutMainWindow(QMainWindow):
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
         self._refresh_gemini_key_status()
         self._refresh_gemini_verify_status()
+        self._refresh_timeline_plan_status()
         self._refresh_ai_plan()
 
     def import_1b2_plan(self):
@@ -1137,6 +1147,7 @@ class MiniCutMainWindow(QMainWindow):
         )
         self._refresh_gemini_key_status()
         self._refresh_gemini_verify_status()
+        self._refresh_timeline_plan_status()
 
         summary = result.summary()
         self.statusBar().showMessage(
@@ -1148,6 +1159,7 @@ class MiniCutMainWindow(QMainWindow):
     def _gemini_verification_error(self, message: str):
         self._refresh_gemini_key_status()
         self.ai_gemini_verify_status.setText("Gemini verify: gagal")
+        self._refresh_timeline_plan_status()
         self.statusBar().showMessage(f"Verifikasi Gemini gagal: {message}")
 
     def _gemini_verification_finished(self):
@@ -1158,6 +1170,7 @@ class MiniCutMainWindow(QMainWindow):
         self.ai_import_gemini_keys.setEnabled(True)
         self._refresh_gemini_key_status()
         self._refresh_gemini_verify_status()
+        self._refresh_timeline_plan_status()
 
     def _gemini_checkpoint_verification(
         self,
@@ -1236,6 +1249,111 @@ class MiniCutMainWindow(QMainWindow):
                 f"{summary['trim']} trim · {summary['reject']} reject"
             )
 
+    def _build_timeline_plan_from_gemini(self):
+        if self.plan_manager.pending is not None:
+            self.statusBar().showMessage(
+                "Masih ada AI plan yang menunggu Apply atau Cancel."
+            )
+            self._refresh_timeline_plan_status()
+            return
+
+        plan = self.v42_1b2_plan
+        unit_id = self._shot_unit_id()
+        packet = self._evidence_checkpoint_packet(unit_id)
+        verification = self._gemini_checkpoint_verification(unit_id)
+        if (
+            plan is None
+            or unit_id is None
+            or packet is None
+            or verification is None
+        ):
+            self.statusBar().showMessage(
+                "Evidence dan verifikasi Gemini unit aktif harus tersedia."
+            )
+            self._refresh_timeline_plan_status()
+            return
+        if not self._gemini_checkpoint_is_current(unit_id):
+            self.statusBar().showMessage(
+                "Verifikasi Gemini sudah stale. Jalankan verifikasi ulang."
+            )
+            self._refresh_timeline_plan_status()
+            return
+
+        try:
+            payload = build_verified_timeline_plan(
+                plan=plan,
+                packet=packet,
+                verification=verification,
+                document=self.document,
+                expected_revision=self.tools.revision,
+            )
+        except V42PlanBuildError as exc:
+            self.statusBar().showMessage(f"AI plan tidak dibuat: {exc}")
+            self._refresh_timeline_plan_status()
+            return
+
+        result = self.plan_manager.propose(payload)
+        if not result.get("ok"):
+            self.statusBar().showMessage(
+                str(result.get("error", {}).get("message", "Gagal membuat AI plan."))
+            )
+            self._refresh_timeline_plan_status()
+            self._refresh_ai_plan()
+            return
+
+        self.record_v42_checkpoint(
+            f"proposal-{unit_id}",
+            block_id=payload.get("block_id"),
+            unit_id=unit_id,
+            payload={
+                "title": payload["title"],
+                "expected_revision": payload["expected_revision"],
+                "action_count": len(payload["actions"]),
+                "created_by": payload.get("created_by"),
+            },
+        )
+        self._refresh_ai_plan()
+        self._refresh_timeline_plan_status()
+        self.statusBar().showMessage(
+            f"AI plan {unit_id} siap direview · timeline belum berubah."
+        )
+
+    def _refresh_timeline_plan_status(self):
+        if not hasattr(self, "ai_timeline_plan_status"):
+            return
+
+        unit_id = self._shot_unit_id()
+        verification = self._gemini_checkpoint_verification(unit_id)
+        current = self._gemini_checkpoint_is_current(unit_id)
+        pending = self.plan_manager.pending
+
+        can_build = (
+            unit_id is not None
+            and verification is not None
+            and current
+            and pending is None
+        )
+        self.ai_build_timeline_plan.setEnabled(can_build)
+
+        if pending is not None:
+            self.ai_timeline_plan_status.setText(
+                f"Timeline plan: {pending.unit_id or '—'} menunggu review"
+            )
+        elif unit_id is None:
+            self.ai_timeline_plan_status.setText("Timeline plan: belum ada unit aktif")
+        elif verification is None:
+            self.ai_timeline_plan_status.setText(
+                f"Timeline plan {unit_id}: butuh verifikasi Gemini"
+            )
+        elif not current:
+            self.ai_timeline_plan_status.setText(
+                f"Timeline plan {unit_id}: verifikasi STALE"
+            )
+        else:
+            self.ai_timeline_plan_status.setText(
+                f"Timeline plan {unit_id}: siap dibuat"
+            )
+
     def _start_local_bridge(self):
         try:
             self.bridge_router = BridgeRouter(
@@ -1262,9 +1380,52 @@ class MiniCutMainWindow(QMainWindow):
     def _validate_ai_plan_action(self, tool: str, args: dict) -> str | None:
         if tool != "insert_clip":
             return None
+
         source = str(args.get("source", ""))
         if not source or source not in self._allowed_bridge_sources():
             return "AI hanya boleh memasukkan media yang sudah di-import ke proyek."
+
+        if str(args.get("origin", "")) != "gemini_verified":
+            return None
+
+        unit_id = str(args.get("unit_id", "")).strip().upper()
+        block_id = str(args.get("block_id", "")).strip().upper()
+        plan = self.v42_1b2_plan
+        if not unit_id or plan is None or unit_id not in plan.units:
+            return "Action V42 tidak memiliki unit 1B2 yang valid."
+
+        unit = plan.units[unit_id]
+        expected_block = (unit.block_id or "").upper()
+        if block_id != expected_block:
+            return "block_id action tidak cocok dengan unit 1B2."
+
+        track_id = str(args.get("track_id", ""))
+        allowed_tracks = {"V2"} if unit.kind == "narration" else {"V1", "A1"}
+        if track_id not in allowed_tracks:
+            return (
+                f"Track {track_id} tidak diizinkan untuk {unit_id} "
+                f"({unit.kind})."
+            )
+
+        packet = self._evidence_checkpoint_packet(unit_id)
+        if packet is None:
+            return "Evidence unit tidak lagi tersedia."
+        if source != packet.source:
+            return "Source action berbeda dari source evidence."
+
+        try:
+            source_in = int(args["source_in_ms"])
+            source_out = int(args["source_out_ms"])
+        except (KeyError, TypeError, ValueError):
+            return "Timestamp source action V42 tidak valid."
+
+        inside_evidence = any(
+            shot.start_ms <= source_in < source_out <= shot.end_ms
+            for shot in packet.shots
+        )
+        if not inside_evidence:
+            return "Rentang source action berada di luar shot evidence."
+
         return None
 
     def _refresh_ai_plan(self):
@@ -1314,6 +1475,8 @@ class MiniCutMainWindow(QMainWindow):
             if stale
             else "AI plan menunggu review · belum mengubah timeline"
         )
+        if hasattr(self, "ai_timeline_plan_status"):
+            self._refresh_timeline_plan_status()
 
     def _apply_ai_plan(self):
         plan = self.plan_manager.pending
@@ -1360,6 +1523,7 @@ class MiniCutMainWindow(QMainWindow):
             f"AI plan diterapkan · rev {self.tools.revision}"
         )
         self._refresh_ai_plan()
+        self._refresh_timeline_plan_status()
 
     def _cancel_ai_plan(self):
         result = self.plan_manager.cancel()
@@ -1370,6 +1534,7 @@ class MiniCutMainWindow(QMainWindow):
                 str(result.get("error", {}).get("message", "Tidak ada plan."))
             )
         self._refresh_ai_plan()
+        self._refresh_timeline_plan_status()
 
     def _allowed_bridge_sources(self) -> set[str]:
         sources = {clip.source for clip in self.document.clips}
@@ -1870,6 +2035,8 @@ class MiniCutMainWindow(QMainWindow):
         self.action_redo.setEnabled(self.history.can_redo)
         if hasattr(self, "ai_status"):
             self._refresh_ai_plan()
+        if hasattr(self, "ai_timeline_plan_status"):
+            self._refresh_timeline_plan_status()
 
     @staticmethod
     def _tool_error_message(result: dict) -> str:
@@ -2124,6 +2291,8 @@ class MiniCutMainWindow(QMainWindow):
         assert self.ai_import_gemini_keys is not None
         assert self.ai_gemini_verify_status is not None
         assert self.ai_verify_gemini is not None
+        assert self.ai_timeline_plan_status is not None
+        assert self.ai_build_timeline_plan is not None
         assert self._timeline_timer.interval() == 33
         self.statusBar().showMessage("SELF TEST PASS")
 

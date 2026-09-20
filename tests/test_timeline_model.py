@@ -71,6 +71,36 @@ class TimelineDocumentTests(unittest.TestCase):
         self.assertEqual(video.track_id, "V2")
         self.assertEqual(audio.track_id, "A1")
 
+    def test_split_preserves_v42_ownership_metadata(self):
+        doc = TimelineDocument.default()
+        video = doc.insert_clip(
+            source="film.mp4",
+            track_id="V1",
+            source_in_ms=0,
+            source_out_ms=10000,
+            timeline_start_ms=0,
+            group_id="v42-J-001-0001",
+            unit_id="J-001",
+            block_id="B-001",
+            origin="gemini_verified",
+        )
+        doc.insert_clip(
+            source="film.mp4",
+            track_id="A1",
+            source_in_ms=0,
+            source_out_ms=10000,
+            timeline_start_ms=0,
+            group_id="v42-J-001-0001",
+            unit_id="J-001",
+            block_id="B-001",
+            origin="gemini_verified",
+        )
+        created = doc.split_linked_at(video.id, 5000)
+        self.assertEqual(len(created), 2)
+        self.assertTrue(all(item.unit_id == "J-001" for item in created))
+        self.assertTrue(all(item.block_id == "B-001" for item in created))
+        self.assertTrue(all(item.origin == "gemini_verified" for item in created))
+
     def test_split_linked_splits_video_and_audio(self):
         doc = TimelineDocument.default()
         video = doc.insert_clip(
