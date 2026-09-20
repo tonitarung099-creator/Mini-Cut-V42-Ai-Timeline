@@ -333,8 +333,7 @@ class MiniCutMainWindow(QMainWindow):
             self.document.split_linked_at(clip_id, self.timeline.playhead_ms)
         except (ValueError, KeyError) as exc:
             # Discard no-op checkpoint by undoing it without exposing it to the user.
-            self.history.undo()
-            self.history._redo.clear()
+            self.history.cancel_checkpoint()
             self.statusBar().showMessage(str(exc))
             self._refresh_edit_actions()
             return
@@ -350,8 +349,7 @@ class MiniCutMainWindow(QMainWindow):
             self.history.checkpoint()
             removed = self.document.remove_linked(clip_id)
         except (ValueError, KeyError) as exc:
-            self.history.undo()
-            self.history._redo.clear()
+            self.history.cancel_checkpoint()
             self.statusBar().showMessage(str(exc))
             self._refresh_edit_actions()
             return
@@ -368,8 +366,7 @@ class MiniCutMainWindow(QMainWindow):
                 timeline_start_ms=timeline_start_ms,
             )
         except (ValueError, KeyError) as exc:
-            self.history.undo()
-            self.history._redo.clear()
+            self.history.cancel_checkpoint()
             self.statusBar().showMessage(str(exc))
             self._refresh_edit_actions()
             return
