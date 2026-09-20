@@ -31,6 +31,12 @@ from PySide6.QtWidgets import (
 
 from .ai_plan import TimelinePlanManager
 from .bridge import BridgeRouter, LocalTimelineBridge, QtBridgeDispatcher
+from .evidence_packets import (
+    UnitEvidencePacket,
+    build_unit_evidence,
+    load_srt,
+    suggest_srt_for_video,
+)
 from .project_store import apply_project, load_project, save_project as save_project_file
 from .shot_detection import UnitShotAnalysis, analyze_unit_candidates
 from .timeline_history import TimelineHistory
@@ -90,6 +96,36 @@ class ShotDetectionWorker(QThread):
         self.resultReady.emit(result)
 
 
+class EvidencePacketWorker(QThread):
+    resultReady = Signal(object)
+    errorRaised = Signal(str)
+
+    def __init__(
+        self,
+        analysis: UnitShotAnalysis,
+        *,
+        one_b2_source_sha256: str,
+        srt_path: str | None = None,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.analysis = analysis
+        self.one_b2_source_sha256 = one_b2_source_sha256
+        self.srt_path = srt_path
+
+    def run(self):
+        try:
+            result = build_unit_evidence(
+                self.analysis,
+                one_b2_source_sha256=self.one_b2_source_sha256,
+                srt_path=self.srt_path,
+            )
+        except Exception as exc:
+            self.errorRaised.emit(str(exc))
+            return
+        self.resultReady.emit(result)
+
+
 class MiniCutMainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -109,7 +145,9 @@ class MiniCutMainWindow(QMainWindow):
         self.project_path: Path | None = None
         self.workflow_state = V42WorkflowState()
         self.v42_1b2_plan: V42OneB2Plan | None = None
+        self.film_srt_path: Path | None = None
         self._shot_worker: ShotDetectionWorker | None = None
+        self._evidence_worker: EvidencePacketWorker | None = None
         self._loading_project = False
 
         # Preview has two contexts: source-bin preview and composed timeline preview.
@@ -350,6 +388,17 @@ class MiniCutMainWindow(QMainWindow):
         self.ai_detect_shots.setEnabled(False)
         self.ai_detect_shots.clicked.connect(self._analyze_next_1b2_unit)
 
+        self.ai_srt_status = QLabel("Film SRT: belum dipilih")
+        self.ai_srt_status.setObjectName("StatusPill")
+        self.ai_import_srt = QPushButton("Import Film SRT")
+        self.ai_import_srt.clicked.connect(self.import_film_srt)
+
+        self.ai_evidence_status = QLabel("Evidence lokal: belum dibuat")
+        self.ai_evidence_status.setObjectName("StatusPill")
+        self.ai_build_evidence = QPushButton("Buat Evidence Lokal")
+        self.ai_build_evidence.setEnabled(False)
+        self.ai_build_evidence.clicked.connect(self._build_active_unit_evidence)
+
         self.ai_input = QPlainTextEdit()
         self.ai_input.setPlaceholderText(
             "Nanti: “Kerjakan B-001”, “Cari visual lain untuk N-007”, dll."
@@ -382,6 +431,10 @@ class MiniCutMainWindow(QMainWindow):
         layout.addWidget(self.ai_import_1b2)
         layout.addWidget(self.ai_shot_status)
         layout.addWidget(self.ai_detect_shots)
+        layout.addWidget(self.ai_srt_status)
+        layout.addWidget(self.ai_import_srt)
+        layout.addWidget(self.ai_evidence_status)
+        layout.addWidget(self.ai_build_evidence)
         layout.addWidget(self.ai_input)
         layout.addWidget(QLabel("AI Plan / Review"))
         layout.addWidget(self.ai_plan_view)
@@ -629,6 +682,7 @@ class MiniCutMainWindow(QMainWindow):
             },
         )
         self._refresh_shot_status()
+        self._refresh_evidence_status()
         summary = result.summary()
         self.statusBar().showMessage(
             f"{result.unit_id}: {summary['candidate_ranges']} candidate range → "
@@ -645,6 +699,7 @@ class MiniCutMainWindow(QMainWindow):
         if worker is not None:
             worker.deleteLater()
         self._refresh_shot_status()
+        self._refresh_evidence_status()
 
     def _shot_checkpoint_analysis(
         self,
@@ -689,6 +744,204 @@ class MiniCutMainWindow(QMainWindow):
             self.ai_shot_status.setText(
                 f"Shot lokal {unit_id}: "
                 f"{summary['candidate_ranges']} kandidat → {summary['shots']} shot"
+            )
+        if hasattr(self, "ai_evidence_status"):
+            self._refresh_evidence_status()
+
+    def import_film_srt(self):
+        filename, _ = QFileDialog.getOpenFileName(
+            self,
+            "Import Film SRT",
+            "",
+            "SubRip Subtitle (*.srt);;All Files (*)",
+        )
+        if not filename:
+            return
+
+        try:
+            cues, digest = load_srt(filename)
+        except (OSError, ValueError, TypeError) as exc:
+            self.statusBar().showMessage(f"Gagal membaca SRT: {exc}")
+            return
+        if not cues:
+            self.statusBar().showMessage("SRT terbaca tetapi tidak berisi subtitle yang valid.")
+            return
+
+        self.film_srt_path = Path(filename)
+        self.record_v42_checkpoint(
+            "film-srt",
+            payload={
+                "path": str(self.film_srt_path),
+                "sha256": digest,
+                "cue_count": len(cues),
+            },
+        )
+        self._refresh_srt_status()
+        self._refresh_evidence_status()
+        self.statusBar().showMessage(
+            f"Film SRT dimuat · {len(cues)} cue · {self.film_srt_path.name}"
+        )
+
+    def _restore_srt_from_workflow(self):
+        self.film_srt_path = None
+        checkpoint = self.workflow_state.checkpoints.get("film-srt")
+        if isinstance(checkpoint, dict):
+            payload = checkpoint.get("payload")
+            if isinstance(payload, dict) and payload.get("path"):
+                self.film_srt_path = Path(str(payload["path"]))
+        self._refresh_srt_status()
+
+    def _resolved_srt_path(self, source: str | None = None) -> Path | None:
+        if self.film_srt_path is not None and self.film_srt_path.is_file():
+            return self.film_srt_path
+        if source:
+            suggested = suggest_srt_for_video(source)
+            if suggested is not None:
+                return suggested
+        return None
+
+    def _refresh_srt_status(self):
+        if not hasattr(self, "ai_srt_status"):
+            return
+        path = self._resolved_srt_path(self._analysis_source_path())
+        if path is None:
+            if self.film_srt_path is not None:
+                self.ai_srt_status.setText("Film SRT: file tersimpan tidak ditemukan")
+            else:
+                self.ai_srt_status.setText("Film SRT: belum dipilih")
+            return
+
+        if self.film_srt_path is None:
+            self.ai_srt_status.setText(f"Film SRT: otomatis · {path.name}")
+        else:
+            self.ai_srt_status.setText(f"Film SRT: {path.name}")
+
+    def _build_active_unit_evidence(self):
+        if self._evidence_worker is not None:
+            self.statusBar().showMessage("Pembuatan evidence lokal masih berjalan.")
+            return
+
+        plan = self.v42_1b2_plan
+        unit_id = self._shot_unit_id()
+        if plan is None or unit_id is None:
+            self.statusBar().showMessage("Import 1B2 dan pilih unit terlebih dahulu.")
+            return
+
+        analysis = self._shot_checkpoint_analysis(unit_id)
+        if analysis is None:
+            self.statusBar().showMessage(
+                "Pecah candidate range per kamera terlebih dahulu."
+            )
+            return
+        if not Path(analysis.source).is_file():
+            self.statusBar().showMessage(
+                f"Film sumber shot analysis tidak ditemukan: {analysis.source}"
+            )
+            return
+
+        srt = self._resolved_srt_path(analysis.source)
+        worker = EvidencePacketWorker(
+            analysis,
+            one_b2_source_sha256=plan.source_sha256,
+            srt_path=(None if srt is None else str(srt)),
+            parent=self,
+        )
+        worker.resultReady.connect(self._evidence_ready)
+        worker.errorRaised.connect(self._evidence_error)
+        worker.finished.connect(self._evidence_worker_finished)
+        self._evidence_worker = worker
+
+        self.ai_build_evidence.setEnabled(False)
+        self.ai_evidence_status.setText(f"Evidence lokal: membuat {unit_id}…")
+        self.statusBar().showMessage(
+            f"Ekstraksi frame sparse + konteks SRT untuk {unit_id}…"
+        )
+        worker.start()
+
+    def _evidence_ready(self, packet: UnitEvidencePacket):
+        plan = self.v42_1b2_plan
+        if plan is None:
+            return
+
+        unit = plan.units.get(packet.unit_id)
+        block_id = unit.block_id if unit is not None else None
+        self.record_v42_checkpoint(
+            f"evidence-{packet.unit_id}",
+            block_id=block_id,
+            unit_id=packet.unit_id,
+            payload={
+                "packet": packet.to_dict(),
+                "summary": packet.summary(),
+            },
+        )
+        self._refresh_evidence_status()
+
+        summary = packet.summary()
+        size_mb = summary["image_bytes"] / (1024 * 1024)
+        self.statusBar().showMessage(
+            f"{packet.unit_id}: evidence siap · {summary['shots']} shot · "
+            f"{summary['frames']} frame · {summary['subtitle_cues']} cue SRT · "
+            f"{size_mb:.2f} MB gambar."
+        )
+
+    def _evidence_error(self, message: str):
+        self.ai_evidence_status.setText("Evidence lokal: gagal")
+        self.statusBar().showMessage(f"Pembuatan evidence gagal: {message}")
+
+    def _evidence_worker_finished(self):
+        worker = self._evidence_worker
+        self._evidence_worker = None
+        if worker is not None:
+            worker.deleteLater()
+        self._refresh_evidence_status()
+
+    def _evidence_checkpoint_packet(
+        self,
+        unit_id: str | None,
+    ) -> UnitEvidencePacket | None:
+        if not unit_id:
+            return None
+        checkpoint = self.workflow_state.checkpoints.get(f"evidence-{unit_id}")
+        if not isinstance(checkpoint, dict):
+            return None
+        payload = checkpoint.get("payload")
+        if not isinstance(payload, dict):
+            return None
+        raw = payload.get("packet")
+        if not isinstance(raw, dict):
+            return None
+        try:
+            return UnitEvidencePacket.from_dict(raw)
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    def _refresh_evidence_status(self):
+        if not hasattr(self, "ai_evidence_status"):
+            return
+
+        unit_id = self._shot_unit_id()
+        analysis = self._shot_checkpoint_analysis(unit_id)
+        running = self._evidence_worker is not None
+        if running:
+            self.ai_build_evidence.setEnabled(False)
+            return
+
+        self.ai_build_evidence.setEnabled(analysis is not None)
+        packet = self._evidence_checkpoint_packet(unit_id)
+        if unit_id is None:
+            self.ai_evidence_status.setText("Evidence lokal: belum ada unit aktif")
+        elif analysis is None:
+            self.ai_evidence_status.setText(
+                f"Evidence lokal {unit_id}: butuh shot analysis"
+            )
+        elif packet is None:
+            self.ai_evidence_status.setText(f"Evidence lokal {unit_id}: belum dibuat")
+        else:
+            summary = packet.summary()
+            self.ai_evidence_status.setText(
+                f"Evidence {unit_id}: {summary['frames']} frame · "
+                f"{summary['subtitle_cues']} cue · "
+                f"{summary['image_bytes'] / (1024 * 1024):.2f} MB"
             )
 
     def _start_local_bridge(self):
@@ -855,6 +1108,16 @@ class MiniCutMainWindow(QMainWindow):
                             self._shot_unit_id()
                         ).summary()
                     ),
+                    "evidence_summary": (
+                        None
+                        if self._evidence_checkpoint_packet(self._shot_unit_id()) is None
+                        else self._evidence_checkpoint_packet(
+                            self._shot_unit_id()
+                        ).summary()
+                    ),
+                    "srt_ready": self._resolved_srt_path(
+                        self._analysis_source_path()
+                    ) is not None,
                 }
             ),
             "imported_sources": sorted(self._allowed_bridge_sources()),
@@ -994,6 +1257,7 @@ class MiniCutMainWindow(QMainWindow):
             )
             self.workflow_state = workflow
             self._restore_1b2_plan_from_workflow()
+            self._restore_srt_from_workflow()
             self.project_path = Path(filename)
 
             self.media_list.clear()
@@ -1089,6 +1353,8 @@ class MiniCutMainWindow(QMainWindow):
         self.preview_mode = "source"
         self.preview_clip_id = None
         self.current_media = path
+        self._refresh_srt_status()
+        self._refresh_evidence_status()
         self.player.setPlaybackRate(1.0)
         self.audio_output.setMuted(False)
         self.player.setSource(QUrl.fromLocalFile(path))
@@ -1542,6 +1808,10 @@ class MiniCutMainWindow(QMainWindow):
         assert self.ai_1b2_status is not None
         assert self.ai_shot_status is not None
         assert self.ai_detect_shots is not None
+        assert self.ai_srt_status is not None
+        assert self.ai_import_srt is not None
+        assert self.ai_evidence_status is not None
+        assert self.ai_build_evidence is not None
         assert self._timeline_timer.interval() == 33
         self.statusBar().showMessage("SELF TEST PASS")
 
