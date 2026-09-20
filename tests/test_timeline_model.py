@@ -122,6 +122,14 @@ class TimelineDocumentTests(unittest.TestCase):
         self.assertEqual(len(removed), 2)
         self.assertEqual(doc.clips, [])
 
+    def test_history_cancel_checkpoint_removes_rejected_operation(self):
+        doc = TimelineDocument.default()
+        history = TimelineHistory(doc)
+        history.checkpoint()
+        self.assertTrue(history.can_undo)
+        self.assertTrue(history.cancel_checkpoint())
+        self.assertFalse(history.can_undo)
+
     def test_history_undo_redo_preserves_document_identity(self):
         doc = TimelineDocument.default()
         history = TimelineHistory(doc)
