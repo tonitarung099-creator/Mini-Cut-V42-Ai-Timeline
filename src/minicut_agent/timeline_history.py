@@ -26,6 +26,12 @@ class TimelineHistory:
         self._redo: list[_Snapshot] = []
         self._redo_before_checkpoint: list[_Snapshot] | None = None
 
+    def reset(self) -> None:
+        """Clear transient undo/redo transactions after loading a project."""
+        self._undo.clear()
+        self._redo.clear()
+        self._redo_before_checkpoint = None
+
     @property
     def can_undo(self) -> bool:
         return bool(self._undo)
