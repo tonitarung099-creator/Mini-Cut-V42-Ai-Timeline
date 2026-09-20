@@ -59,6 +59,10 @@ from .v42_narration import (
     build_narration_timings,
     load_narration_script,
 )
+from .v42_prompt3_revision import (
+    Prompt3RevisionError,
+    build_prompt3_visual_replacement_plan,
+)
 from .v42_regions import V42RegionLayout, compute_region_layout
 from .v42_state import V42WorkflowState
 from .v42_verified_plan import V42PlanBuildError, build_verified_timeline_plan
@@ -522,6 +526,11 @@ class MiniCutMainWindow(QMainWindow):
         self.ai_build_timeline_plan = QPushButton("Buat AI Plan dari Gemini")
         self.ai_build_timeline_plan.setEnabled(False)
         self.ai_build_timeline_plan.clicked.connect(self._build_timeline_plan_from_gemini)
+        self.ai_replace_selected_visual = QPushButton("Ganti Visual N Terpilih")
+        self.ai_replace_selected_visual.setEnabled(False)
+        self.ai_replace_selected_visual.clicked.connect(
+            self._build_selected_prompt3_revision
+        )
 
         self.ai_input = QPlainTextEdit()
         self.ai_input.setPlaceholderText(
@@ -572,6 +581,7 @@ class MiniCutMainWindow(QMainWindow):
         layout.addWidget(self.ai_verify_gemini)
         layout.addWidget(self.ai_timeline_plan_status)
         layout.addWidget(self.ai_build_timeline_plan)
+        layout.addWidget(self.ai_replace_selected_visual)
         layout.addWidget(self.ai_input)
         layout.addWidget(QLabel("AI Plan / Review"))
         layout.addWidget(self.ai_plan_view)
@@ -1952,6 +1962,135 @@ class MiniCutMainWindow(QMainWindow):
                 f"Timeline plan {unit_id}: siap dibuat"
             )
 
+    def _build_selected_prompt3_revision(self):
+        if self.plan_manager.pending is not None:
+            self.statusBar().showMessage(
+                "Masih ada AI plan yang menunggu Apply atau Cancel."
+            )
+            return
+
+        clip_id = self.timeline.selected_clip_id
+        if not clip_id:
+            self.statusBar().showMessage(
+                "Pilih satu visual N Prompt 3 di timeline terlebih dahulu."
+            )
+            return
+        try:
+            clip = self.document.clip(clip_id)
+        except KeyError:
+            self.statusBar().showMessage("Clip terpilih tidak ditemukan.")
+            return
+
+        unit_id = (clip.unit_id or "").upper()
+        plan = self.v42_1b2_plan
+        packet = self._evidence_checkpoint_packet(unit_id)
+        verification = self._gemini_checkpoint_verification(unit_id)
+        if (
+            plan is None
+            or not unit_id
+            or packet is None
+            or verification is None
+        ):
+            self.statusBar().showMessage(
+                "1B2/evidence/Gemini unit clip terpilih tidak tersedia."
+            )
+            return
+        if not self._gemini_checkpoint_is_current(unit_id):
+            self.statusBar().showMessage(
+                "Gemini unit clip terpilih sudah stale; verifikasi ulang dahulu."
+            )
+            return
+        if not self._has_narration_a2(unit_id):
+            self.statusBar().showMessage(
+                "Audio A2 unit narasi tidak tersedia; revisi visual dihentikan."
+            )
+            return
+
+        try:
+            payload = build_prompt3_visual_replacement_plan(
+                plan=plan,
+                packet=packet,
+                verification=verification,
+                document=self.document,
+                clip_id=clip_id,
+                expected_revision=self.tools.revision,
+            )
+        except Prompt3RevisionError as exc:
+            message = str(exc)
+            if "PERLU REVISI" in message.upper():
+                unit = plan.units.get(unit_id)
+                self.workflow_state.set_unit_status(
+                    unit_id,
+                    "needs_revision",
+                    block_id=(None if unit is None else unit.block_id),
+                    timeline_revision=self.tools.revision,
+                    note=message,
+                )
+            self.statusBar().showMessage(f"Visual tidak diganti: {message}")
+            return
+
+        result = self.plan_manager.propose(payload)
+        if not result.get("ok"):
+            self.statusBar().showMessage(
+                str(
+                    result.get("error", {}).get(
+                        "message",
+                        "Gagal membuat plan revisi visual.",
+                    )
+                )
+            )
+            return
+
+        self.record_v42_checkpoint(
+            f"revision-proposal-{unit_id}-{clip_id[:8]}",
+            block_id=payload.get("block_id"),
+            unit_id=unit_id,
+            payload={
+                "clip_id": clip_id,
+                "title": payload["title"],
+                "action_count": len(payload["actions"]),
+            },
+        )
+        self._refresh_ai_plan()
+        self._refresh_edit_actions()
+        self.statusBar().showMessage(
+            f"Plan pengganti satu visual {unit_id} siap direview."
+        )
+
+    def _selected_prompt3_visual_clip(self):
+        clip_id = getattr(self.timeline, "selected_clip_id", None)
+        if not clip_id:
+            return None
+        try:
+            clip = self.document.clip(clip_id)
+        except KeyError:
+            return None
+        if (
+            clip.track_id == "V2"
+            and clip.origin in {"prompt3_visual", "prompt3_visual_revision"}
+            and bool(clip.unit_id)
+        ):
+            return clip
+        return None
+
+    def _refresh_prompt3_revision_button(self):
+        if not hasattr(self, "ai_replace_selected_visual"):
+            return
+        clip = self._selected_prompt3_visual_clip()
+        ready = False
+        if (
+            clip is not None
+            and self.plan_manager.pending is None
+            and not clip.locked
+            and not self.document.track(clip.track_id).locked
+        ):
+            unit_id = (clip.unit_id or "").upper()
+            ready = (
+                self._gemini_checkpoint_is_current(unit_id)
+                and self._has_narration_a2(unit_id)
+            )
+        self.ai_replace_selected_visual.setEnabled(bool(ready))
+
     def _start_local_bridge(self):
         try:
             self.bridge_router = BridgeRouter(
@@ -2008,11 +2147,11 @@ class MiniCutMainWindow(QMainWindow):
                 return "Rentang audio plan berbeda dari safe-padding waveform."
             return None
 
-        if origin == "prompt3_visual":
+        if origin in {"prompt3_visual", "prompt3_visual_revision"}:
             unit_id = str(args.get("unit_id", "")).strip().upper()
             plan = self.v42_1b2_plan
             if plan is None or unit_id not in plan.units:
-                return "Visual Prompt 3 tidak memiliki unit V42 yang valid."
+                return "Visual Prompt 3/revisi tidak memiliki unit V42 yang valid."
             unit = plan.units[unit_id]
             if unit.kind != "narration" or str(args.get("track_id", "")) != "V2":
                 return "Visual Prompt 3 N hanya boleh ditempatkan di V2."
@@ -2084,6 +2223,43 @@ class MiniCutMainWindow(QMainWindow):
         return None
 
     def _validate_ai_plan(self, plan: TimelinePlan) -> str | None:
+        if plan.created_by == "prompt3-visual-revision":
+            unit_id = (plan.unit_id or "").strip().upper()
+            if not self._gemini_checkpoint_is_current(unit_id):
+                return "Verifikasi Gemini untuk revisi visual sudah stale."
+            if not self._has_narration_a2(unit_id):
+                return "Audio A2 unit revisi tidak lagi tersedia."
+            delete_actions = [
+                action
+                for action in plan.actions
+                if action.get("tool") == "delete_clip"
+            ]
+            if len(delete_actions) != 1:
+                return "Plan revisi harus menghapus tepat satu clip visual."
+            clip_id = str(delete_actions[0].get("args", {}).get("clip_id", ""))
+            packet = self._evidence_checkpoint_packet(unit_id)
+            verification = self._gemini_checkpoint_verification(unit_id)
+            source_plan = self.v42_1b2_plan
+            if packet is None or verification is None or source_plan is None:
+                return "Data sumber revisi visual tidak lagi tersedia."
+            try:
+                expected = build_prompt3_visual_replacement_plan(
+                    plan=source_plan,
+                    packet=packet,
+                    verification=verification,
+                    document=self.document,
+                    clip_id=clip_id,
+                    expected_revision=self.tools.revision,
+                )
+            except Prompt3RevisionError as exc:
+                return f"Plan revisi tidak lagi dapat dibangun: {exc}"
+            if expected.get("actions") != plan.actions:
+                return (
+                    "Action revisi visual tidak lagi identik dengan hasil "
+                    "deterministik terbaru."
+                )
+            return None
+
         if plan.created_by != "prompt3-visual-fit":
             return None
 
@@ -2187,6 +2363,7 @@ class MiniCutMainWindow(QMainWindow):
                 self.ai_status.setText(
                     f"Local timeline tools ready · rev {self.tools.revision}"
                 )
+            self._refresh_prompt3_revision_button()
             return
 
         stale = plan.expected_revision != self.tools.revision
@@ -2226,6 +2403,9 @@ class MiniCutMainWindow(QMainWindow):
             self._refresh_region_status()
         if hasattr(self, "ai_narration_status"):
             self._refresh_narration_status()
+        if hasattr(self, "ai_replace_selected_visual"):
+            self._refresh_prompt3_revision_button()
+        self._refresh_prompt3_revision_button()
 
     def _apply_ai_plan(self):
         plan = self.plan_manager.pending
@@ -3089,6 +3269,7 @@ class MiniCutMainWindow(QMainWindow):
         assert self.ai_verify_gemini is not None
         assert self.ai_timeline_plan_status is not None
         assert self.ai_build_timeline_plan is not None
+        assert self.ai_replace_selected_visual is not None
         assert self._timeline_timer.interval() == 33
         self.statusBar().showMessage("SELF TEST PASS")
 
