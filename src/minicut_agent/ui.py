@@ -51,6 +51,7 @@ from .timeline_model import TimelineDocument
 from .timeline_tools import TimelineToolRegistry
 from .timeline_view import TimelineView
 from .v42_1b2 import V42OneB2Plan, load_1b2
+from .v42_regions import V42RegionLayout, compute_region_layout
 from .v42_state import V42WorkflowState
 from .v42_verified_plan import V42PlanBuildError, build_verified_timeline_plan
 
@@ -423,6 +424,8 @@ class MiniCutMainWindow(QMainWindow):
         self.ai_unit = QLabel("Unit V42: —")
         self.ai_1b2_status = QLabel("1B2: belum dimuat")
         self.ai_1b2_status.setObjectName("StatusPill")
+        self.ai_region_status = QLabel("V42 region: belum tersedia")
+        self.ai_region_status.setObjectName("StatusPill")
         self.ai_import_1b2 = QPushButton("Import 1B2")
         self.ai_import_1b2.clicked.connect(self.import_1b2_plan)
         self.ai_shot_status = QLabel("Shot lokal: belum dianalisis")
@@ -487,6 +490,7 @@ class MiniCutMainWindow(QMainWindow):
         layout.addWidget(self.ai_status)
         layout.addWidget(self.ai_unit)
         layout.addWidget(self.ai_1b2_status)
+        layout.addWidget(self.ai_region_status)
         layout.addWidget(self.ai_import_1b2)
         layout.addWidget(self.ai_shot_status)
         layout.addWidget(self.ai_detect_shots)
@@ -510,6 +514,7 @@ class MiniCutMainWindow(QMainWindow):
         self._refresh_gemini_key_status()
         self._refresh_gemini_verify_status()
         self._refresh_timeline_plan_status()
+        self._refresh_region_status()
         self._refresh_ai_plan()
 
     def import_1b2_plan(self):
@@ -569,8 +574,10 @@ class MiniCutMainWindow(QMainWindow):
                 "summary": plan.summary(),
             },
         )
+        self._record_region_layout()
         self._refresh_1b2_status()
         self._refresh_shot_status()
+        self._refresh_region_status()
 
         summary = plan.summary()
         message = (
@@ -604,6 +611,7 @@ class MiniCutMainWindow(QMainWindow):
             self.v42_1b2_plan = None
         self._refresh_1b2_status()
         self._refresh_shot_status()
+        self._refresh_region_status()
 
     def _next_1b2_unit_id(self) -> str | None:
         plan = self.v42_1b2_plan
@@ -648,6 +656,61 @@ class MiniCutMainWindow(QMainWindow):
             f"berikutnya {next_unit}"
         )
         self._refresh_shot_status()
+        self._refresh_region_status()
+
+    def _current_region_layout(self) -> V42RegionLayout | None:
+        plan = self.v42_1b2_plan
+        if plan is None:
+            return None
+        return compute_region_layout(plan, self.document)
+
+    def _record_region_layout(self):
+        layout = self._current_region_layout()
+        plan = self.v42_1b2_plan
+        if layout is None or plan is None:
+            return
+        self.record_v42_checkpoint(
+            "v42-regions",
+            block_id=self.workflow_state.active_block,
+            unit_id=self.workflow_state.active_unit,
+            payload={
+                "layout": layout.to_dict(),
+                "summary": layout.summary(),
+                "one_b2_source_sha256": plan.source_sha256,
+            },
+        )
+
+    def _refresh_region_status(self):
+        if not hasattr(self, "ai_region_status"):
+            return
+        layout = self._current_region_layout()
+        if layout is None:
+            self.ai_region_status.setText("V42 region: belum tersedia")
+            return
+
+        unit_id = self._shot_unit_id()
+        if unit_id is None:
+            summary = layout.summary()
+            self.ai_region_status.setText(
+                f"V42 region · {summary['regions']} unit · "
+                f"{summary['materialized']} sudah di timeline"
+            )
+            return
+
+        try:
+            region = layout.region(unit_id)
+        except KeyError:
+            self.ai_region_status.setText(
+                f"V42 region {unit_id}: belum ada di Urutan Tayang"
+            )
+            return
+
+        state = "timeline" if region.materialized else "provisional"
+        self.ai_region_status.setText(
+            f"Region #{region.order_index} {unit_id} · "
+            f"{region.start_ms / 1000:.2f}s–{region.end_ms / 1000:.2f}s · "
+            f"{state}/{region.duration_source}"
+        )
 
     def _analysis_source_path(self) -> str | None:
         selected = self.media_list.selectedItems()
@@ -1477,6 +1540,8 @@ class MiniCutMainWindow(QMainWindow):
         )
         if hasattr(self, "ai_timeline_plan_status"):
             self._refresh_timeline_plan_status()
+        if hasattr(self, "ai_region_status"):
+            self._refresh_region_status()
 
     def _apply_ai_plan(self):
         plan = self.plan_manager.pending
@@ -1516,6 +1581,7 @@ class MiniCutMainWindow(QMainWindow):
                     "action_count": len(applied.get("actions", [])),
                 },
             )
+            self._record_region_layout()
 
         self.timeline.clear_selection()
         self._clear_inspector()
@@ -1524,6 +1590,7 @@ class MiniCutMainWindow(QMainWindow):
         )
         self._refresh_ai_plan()
         self._refresh_timeline_plan_status()
+        self._refresh_region_status()
 
     def _cancel_ai_plan(self):
         result = self.plan_manager.cancel()
@@ -1588,6 +1655,27 @@ class MiniCutMainWindow(QMainWindow):
                                 self._shot_unit_id()
                             ),
                         }
+                    ),
+                }
+            ),
+            "v42_regions": (
+                None
+                if self._current_region_layout() is None
+                else {
+                    "summary": self._current_region_layout().summary(),
+                    "active_region": (
+                        None
+                        if self._shot_unit_id() is None
+                        else (
+                            self._current_region_layout()
+                            .region(self._shot_unit_id())
+                            .to_dict()
+                            if any(
+                                item.unit_id == self._shot_unit_id()
+                                for item in self._current_region_layout().regions
+                            )
+                            else None
+                        )
                     ),
                 }
             ),
@@ -2023,6 +2111,9 @@ class MiniCutMainWindow(QMainWindow):
                 autoplay=self._timeline_playing,
                 force_seek=True,
             )
+        if self.v42_1b2_plan is not None:
+            self._record_region_layout()
+            self._refresh_region_status()
         self._autosave_project()
         if message:
             self.statusBar().showMessage(message)
@@ -2037,6 +2128,8 @@ class MiniCutMainWindow(QMainWindow):
             self._refresh_ai_plan()
         if hasattr(self, "ai_timeline_plan_status"):
             self._refresh_timeline_plan_status()
+        if hasattr(self, "ai_region_status"):
+            self._refresh_region_status()
 
     @staticmethod
     def _tool_error_message(result: dict) -> str:
@@ -2280,6 +2373,7 @@ class MiniCutMainWindow(QMainWindow):
         assert isinstance(self.workflow_state, V42WorkflowState)
         assert self.v42_1b2_plan is None
         assert self.ai_1b2_status is not None
+        assert self.ai_region_status is not None
         assert self.ai_shot_status is not None
         assert self.ai_detect_shots is not None
         assert self.ai_srt_status is not None

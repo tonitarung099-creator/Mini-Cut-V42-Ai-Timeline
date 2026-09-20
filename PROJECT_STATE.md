@@ -19,31 +19,32 @@
 - Candidate-constrained local shot/camera-cut detection: VERIFIED.
 - Sparse frame extraction + SRT overlap evidence packets: VERIFIED.
 - Gemini local key pool (up to 100) + health/cooldown/failover: VERIFIED.
-- Bounded Gemini evidence request/structured response client: VERIFIED and merged.
-- Persistent V42 ownership metadata on timeline clips: IMPLEMENTED in current milestone; CI verification required.
-- Gemini verification → validated review-first timeline-plan conversion: IMPLEMENTED in current milestone; CI verification required.
-- Full Prompt 2/3 unit orchestration and owned timeline regions: NOT STARTED.
+- Bounded Gemini evidence request/structured response client: VERIFIED.
+- Persistent V42 ownership metadata on timeline clips: VERIFIED.
+- Gemini verification → validated review-first timeline-plan conversion: VERIFIED and merged.
+- Display-order V42 timeline regions + atomic reflow: IMPLEMENTED in current milestone; CI verification required.
+- A2 narration timing and Prompt 3 duration fitting: NOT STARTED.
+- Full Prompt 2 anchor dialog/action/campuran orchestration: NOT STARTED.
+- Targeted replace/revision of an existing unit: NOT STARTED.
 - Prompt 4 block auditor: NOT STARTED.
 - Prompt 5/final FFmpeg/SmartCut export reconstruction: NOT STARTED.
 
 ## Architecture rule
 
-The timeline remains the single source of truth. Gemini may verify evidence, but local MiniCut code converts that verification into deterministic source ranges and a reviewable plan. Gemini never sends direct mutation commands. Every V42-generated clip carries durable unit/block ownership metadata.
+Urutan Pengerjaan controls what the AI works on next; Urutan Tayang controls where units belong in the timeline. They are independent. Region layout is computed locally from 1B2 and durable clip ownership. Reflow is expressed as ordinary reviewed timeline actions and remains atomic/undoable.
 
 ## Current milestone
 
-A current `gemini-<UNIT>` checkpoint can now be converted into a pending TimelinePlan. Local validation rechecks evidence bounds, source reuse, unit identity and track ownership. Narration visual clips are proposed on V2 with film audio muted. Anchor clips are proposed as linked V1+A1 pairs at 1×. The plan is only applied after explicit review.
-
-For this milestone, a newly created unit is appended after the current timeline duration. Automatic placement according to the complete V42 display order is intentionally deferred until unit-region orchestration exists.
+MiniCut now derives N/J timeline regions from block display order, tracks provisional versus materialized duration, reserves pre-existing manual content, and can shift already-built later units when an earlier display-order unit becomes known. Linked anchor audio/video groups move together. The AI panel and local bridge expose compact region state, and a durable `v42-regions` checkpoint follows timeline mutations.
 
 ## Next technically justified action
 
-After this milestone passes CI:
+After region/reflow CI passes:
 
-1. introduce durable V42 timeline regions for B/N/J ownership;
-2. derive block display order independently from work order;
-3. map narration audio/subtitle duration to N unit regions on A2;
-4. implement Prompt 3 duration fitting, slow-motion/freeze/handoff rules inside N regions;
-5. implement Prompt 2 dialog/action/campuran rules for J regions;
-6. support targeted replace/revision of an existing unit instead of duplicate insertion;
+1. import/identify narration audio and narration subtitle sources;
+2. map A2 narration audio segments to N units;
+3. make narration duration authoritative for N timeline regions;
+4. fit Gemini-selected visual ranges to N duration with Prompt 3 rules (chronology, speed, freeze, handoff);
+5. implement Prompt 2 Jangkar mode rules over J regions;
+6. add targeted replace/revision for an existing N/J unit;
 7. implement Prompt 4 block audit and Prompt 5/final export.

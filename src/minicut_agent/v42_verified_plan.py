@@ -8,6 +8,11 @@ from .evidence_packets import ShotEvidence, UnitEvidencePacket
 from .gemini_client import GeminiShotDecision, GeminiUnitVerification
 from .timeline_model import TimelineDocument, TimelineClip
 from .v42_1b2 import V42OneB2Plan, V42UnitSpec
+from .v42_regions import (
+    V42RegionError,
+    build_reflow_actions,
+    compute_region_layout,
+)
 
 
 class V42PlanBuildError(ValueError):
@@ -54,11 +59,38 @@ def build_verified_timeline_plan(
         selections,
     )
 
-    start = document.duration_ms if timeline_start_ms is None else int(timeline_start_ms)
+    total_duration = sum(item.duration_ms for item in selections)
+    reflow_actions: list[dict[str, Any]] = []
+    region_note = ""
+
+    if timeline_start_ms is None:
+        layout = compute_region_layout(
+            plan,
+            document,
+            duration_overrides={unit.id: total_duration},
+        )
+        try:
+            region = layout.region(unit.id)
+            reflow_actions = build_reflow_actions(
+                document,
+                layout,
+                exclude_unit_ids={unit.id},
+            )
+        except (KeyError, V42RegionError) as exc:
+            raise V42PlanBuildError(str(exc)) from exc
+        start = region.start_ms
+        region_note = (
+            f" Posisi mengikuti Urutan Tayang region #{region.order_index}; "
+            f"{len(reflow_actions)} action reflow diperlukan."
+        )
+    else:
+        start = int(timeline_start_ms)
+        region_note = " Posisi timeline diberikan eksplisit tanpa reflow region."
+
     if start < 0:
         raise V42PlanBuildError("timeline_start_ms tidak boleh negatif.")
 
-    actions: list[dict[str, Any]] = []
+    actions: list[dict[str, Any]] = list(reflow_actions)
     cursor = start
 
     for selection in selections:
@@ -133,8 +165,6 @@ def build_verified_timeline_plan(
     kept = sum(1 for item in verification.decisions if item.decision == "keep")
     trimmed = sum(1 for item in verification.decisions if item.decision == "trim")
     rejected = sum(1 for item in verification.decisions if item.decision == "reject")
-    total_duration = sum(item.duration_ms for item in selections)
-
     return {
         "title": f"Susun visual terverifikasi {unit.id}",
         "expected_revision": int(expected_revision),
@@ -146,7 +176,8 @@ def build_verified_timeline_plan(
             f"{kept} keep, {trimmed} trim, {rejected} reject. "
             f"Setelah validasi lokal, {len(selections)} rentang sumber "
             f"({total_duration / 1000:.2f} detik) akan ditempatkan mulai "
-            f"{start / 1000:.3f}s. "
+            f"{start / 1000:.3f}s."
+            f"{region_note} "
             + (
                 "Unit narasi memakai V2 tanpa audio film."
                 if unit.kind == "narration"
