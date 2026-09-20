@@ -122,6 +122,47 @@ class TimelineToolRegistryTests(unittest.TestCase):
         self.assertTrue(undo["ok"])
         self.assertEqual({c.speed for c in self.document.clips}, {1.0})
 
+    def test_failed_mutation_preserves_existing_redo_chain(self):
+        inserted = self.tools.execute(
+            "insert_clip",
+            {
+                "source": "film.mp4",
+                "track_id": "V1",
+                "source_in_ms": 0,
+                "source_out_ms": 5000,
+                "timeline_start_ms": 0,
+            },
+        )
+        self.assertTrue(inserted["ok"])
+        self.assertTrue(
+            self.tools.execute(
+                "undo",
+                {"expected_revision": self.tools.revision},
+            )["ok"]
+        )
+        self.assertTrue(self.history.can_redo)
+
+        failed = self.tools.execute(
+            "insert_clip",
+            {
+                "source": "bad.mp4",
+                "track_id": "NOT_A_TRACK",
+                "source_in_ms": 0,
+                "source_out_ms": 1000,
+                "timeline_start_ms": 0,
+                "expected_revision": self.tools.revision,
+            },
+        )
+        self.assertFalse(failed["ok"])
+        self.assertTrue(self.history.can_redo)
+
+        redone = self.tools.execute(
+            "redo",
+            {"expected_revision": self.tools.revision},
+        )
+        self.assertTrue(redone["ok"])
+        self.assertEqual(len(self.document.clips), 1)
+
     def test_locked_track_rejects_move_and_does_not_add_history(self):
         inserted = self.tools.execute(
             "insert_clip",
