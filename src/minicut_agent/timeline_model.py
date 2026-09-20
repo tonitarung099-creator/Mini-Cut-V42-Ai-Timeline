@@ -47,7 +47,19 @@ class TimelineClip:
         return self.timeline_start_ms + self.timeline_duration_ms
 
     def contains_timeline_time(self, milliseconds: int) -> bool:
+        """Strict interior check used for destructive edits such as split."""
         return self.timeline_start_ms < milliseconds < self.timeline_end_ms
+
+    def covers_timeline_time(self, milliseconds: int) -> bool:
+        """Playback coverage uses an inclusive start and exclusive end."""
+        return self.timeline_start_ms <= milliseconds < self.timeline_end_ms
+
+    def source_position_at(self, timeline_ms: int) -> int:
+        """Map a timeline position inside this clip back to source media time."""
+        if not self.covers_timeline_time(timeline_ms):
+            raise ValueError("Posisi timeline berada di luar clip.")
+        offset = int(round((timeline_ms - self.timeline_start_ms) * self.speed))
+        return min(self.source_out_ms - 1, self.source_in_ms + max(0, offset))
 
 
 @dataclass
@@ -229,6 +241,50 @@ class TimelineDocument:
 
         self._sort_clips()
         return created
+
+    def clips_at(self, timeline_ms: int, *, kind: TrackKind | None = None) -> list[TimelineClip]:
+        """Return visible clips covering timeline_ms ordered top-track first."""
+        candidates: list[TimelineClip] = []
+        for clip in self.clips:
+            track = self.track(clip.track_id)
+            if not track.visible:
+                continue
+            if kind is not None and track.kind != kind:
+                continue
+            if clip.covers_timeline_time(timeline_ms):
+                candidates.append(clip)
+        candidates.sort(
+            key=lambda clip: (
+                self._track_index(clip.track_id),
+                -clip.timeline_start_ms,
+                clip.id,
+            )
+        )
+        return candidates
+
+    def video_clip_at(self, timeline_ms: int) -> TimelineClip | None:
+        clips = self.clips_at(timeline_ms, kind="video")
+        return clips[0] if clips else None
+
+    def next_video_clip_after(self, timeline_ms: int) -> TimelineClip | None:
+        candidates = [
+            clip
+            for clip in self.clips
+            if self.track(clip.track_id).kind == "video"
+            and self.track(clip.track_id).visible
+            and clip.timeline_end_ms > timeline_ms
+        ]
+        if not candidates:
+            return None
+        candidates.sort(
+            key=lambda clip: (
+                max(timeline_ms, clip.timeline_start_ms),
+                self._track_index(clip.track_id),
+                -clip.timeline_start_ms,
+                clip.id,
+            )
+        )
+        return candidates[0]
 
     def clips_on_track(self, track_id: str) -> list[TimelineClip]:
         self.track(track_id)
