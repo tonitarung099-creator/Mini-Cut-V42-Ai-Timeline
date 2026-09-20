@@ -4,9 +4,13 @@ import unittest
 from pathlib import Path
 
 from minicut_agent.evidence_packets import SubtitleCue
+from minicut_agent.timeline_model import TimelineDocument
 from minicut_agent.v42_1b2 import V42BlockSpec, V42OneB2Plan, V42UnitSpec
 from minicut_agent.v42_narration import (
     FFmpegSilenceDetector,
+    NarrationAudioTiming,
+    NarrationTimingSet,
+    build_narration_audio_plan,
     NarrationCueMapping,
     NarrationMappingError,
     SilenceInterval,
@@ -140,6 +144,93 @@ Kemudian ia membuka berkas rahasia di meja.
             timing.boundary_method,
             "waveform-silence/waveform-silence",
         )
+
+    def test_a2_audio_plan_uses_authoritative_timing_and_region(self):
+        doc = TimelineDocument.default()
+        timing_set = NarrationTimingSet(
+            audio_path="narration.wav",
+            audio_fingerprint="audio-fp",
+            narration_srt_path="narration.srt",
+            narration_srt_sha256="srt",
+            script_sha256="script",
+            timings={
+                "N-001": NarrationAudioTiming(
+                    unit_id="N-001",
+                    source_in_ms=900,
+                    source_out_ms=4100,
+                    core_start_ms=1100,
+                    core_end_ms=3800,
+                    pre_padding_ms=200,
+                    post_padding_ms=300,
+                    mapping_similarity=0.95,
+                    mapping_method="monotonic-text",
+                    boundary_method="waveform-silence/waveform-silence",
+                )
+            },
+        )
+        payload = build_narration_audio_plan(
+            plan=self.plan(),
+            timing_set=timing_set,
+            document=doc,
+            unit_id="N-001",
+            expected_revision=3,
+        )
+        self.assertEqual(payload["expected_revision"], 3)
+        insert = payload["actions"][-1]
+        self.assertEqual(insert["tool"], "insert_clip")
+        self.assertEqual(insert["args"]["track_id"], "A2")
+        self.assertEqual(insert["args"]["source_in_ms"], 900)
+        self.assertEqual(insert["args"]["source_out_ms"], 4100)
+        self.assertEqual(insert["args"]["timeline_start_ms"], 0)
+        self.assertEqual(insert["args"]["origin"], "narration_audio")
+
+    def test_a2_audio_plan_reflows_later_anchor(self):
+        doc = TimelineDocument.default()
+        doc.insert_clip(
+            source="film.mp4",
+            track_id="V1",
+            source_in_ms=10000,
+            source_out_ms=12000,
+            timeline_start_ms=0,
+            group_id="j",
+            unit_id="J-001",
+            block_id="B-001",
+            origin="gemini_verified",
+        )
+        doc.insert_clip(
+            source="film.mp4",
+            track_id="A1",
+            source_in_ms=10000,
+            source_out_ms=12000,
+            timeline_start_ms=0,
+            group_id="j",
+            unit_id="J-001",
+            block_id="B-001",
+            origin="gemini_verified",
+        )
+        timing_set = NarrationTimingSet(
+            audio_path="narration.wav",
+            audio_fingerprint="audio-fp",
+            narration_srt_path="narration.srt",
+            narration_srt_sha256="srt",
+            script_sha256="script",
+            timings={
+                "N-001": NarrationAudioTiming(
+                    "N-001", 0, 5000, 200, 4700, 200, 300,
+                    0.9, "monotonic-text", "waveform-silence/waveform-silence"
+                )
+            },
+        )
+        payload = build_narration_audio_plan(
+            plan=self.plan(),
+            timing_set=timing_set,
+            document=doc,
+            unit_id="N-001",
+            expected_revision=2,
+        )
+        self.assertEqual(payload["actions"][0]["tool"], "move_clip")
+        self.assertEqual(payload["actions"][0]["args"]["timeline_start_ms"], 5000)
+        self.assertEqual(payload["actions"][-1]["args"]["timeline_start_ms"], 0)
 
     def test_detector_scans_only_local_window(self):
         commands = []
