@@ -49,6 +49,14 @@ class GeminiKeyPoolTests(unittest.TestCase):
         states = {item["key_id"]: item for item in pool.summary()["keys"]}
         self.assertEqual(states[first.key_id]["status"], "cooldown")
 
+    def test_bad_request_does_not_disable_key(self):
+        pool = GeminiKeyPool([fake_key(1)])
+        record = pool.acquire()
+        pool.report_failure(record.key_id, status_code=400, error="bad request")
+        state = pool.summary()["keys"][0]
+        self.assertEqual(state["status"], "ready")
+        self.assertEqual(state["failure_count"], 1)
+
     def test_auth_error_disables_key(self):
         pool = GeminiKeyPool([fake_key(1), fake_key(2)])
         first = pool.acquire()
