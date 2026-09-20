@@ -7,7 +7,7 @@ from minicut_agent.gemini_client import (
     GeminiUnitVerification,
 )
 from minicut_agent.timeline_model import TimelineDocument
-from minicut_agent.v42_1b2 import V42OneB2Plan, V42UnitSpec
+from minicut_agent.v42_1b2 import V42BlockSpec, V42OneB2Plan, V42UnitSpec
 from minicut_agent.v42_verified_plan import (
     V42PlanBuildError,
     build_verified_timeline_plan,
@@ -130,6 +130,61 @@ class VerifiedTimelinePlanTests(unittest.TestCase):
             expected_revision=0,
         )
         self.assertEqual(payload["actions"][0]["args"]["timeline_start_ms"], 8000)
+
+    def test_display_order_reflows_later_unit_even_when_worked_first(self):
+        doc = TimelineDocument.default()
+        doc.insert_clip(
+            source="other-film.mp4",
+            track_id="V1",
+            source_in_ms=10000,
+            source_out_ms=12000,
+            timeline_start_ms=0,
+            group_id="v42-J-001-0001",
+            unit_id="J-001",
+            block_id="B-001",
+            origin="gemini_verified",
+        )
+        doc.insert_clip(
+            source="other-film.mp4",
+            track_id="A1",
+            source_in_ms=10000,
+            source_out_ms=12000,
+            timeline_start_ms=0,
+            group_id="v42-J-001-0001",
+            unit_id="J-001",
+            block_id="B-001",
+            origin="gemini_verified",
+        )
+        plan = V42OneB2Plan(
+            source_path="1b2.json",
+            source_sha256="hash",
+            blocks={
+                "B-001": V42BlockSpec(
+                    id="B-001",
+                    unit_ids=["N-001", "J-001"],
+                    display_order=["N-001", "J-001"],
+                    work_order=["J-001", "N-001"],
+                )
+            },
+            units={
+                "N-001": V42UnitSpec("N-001", "narration", "B-001"),
+                "J-001": V42UnitSpec("J-001", "anchor", "B-001"),
+            },
+            work_queue=["J-001", "N-001"],
+        )
+        payload = build_verified_timeline_plan(
+            plan=plan,
+            packet=self.packet("N-001"),
+            verification=verification("N-001", self.decisions()),
+            document=doc,
+            expected_revision=2,
+        )
+        # N-001 selected duration is 5s, so already-built J-001 moves to 5s.
+        self.assertEqual(payload["actions"][0]["tool"], "move_clip")
+        self.assertEqual(payload["actions"][0]["args"]["timeline_start_ms"], 5000)
+        inserts = [a for a in payload["actions"] if a["tool"] == "insert_clip"]
+        self.assertEqual(inserts[0]["args"]["timeline_start_ms"], 0)
+        self.assertEqual(inserts[1]["args"]["timeline_start_ms"], 3000)
 
     def test_existing_same_unit_refuses_duplicate_plan(self):
         doc = TimelineDocument.default()
