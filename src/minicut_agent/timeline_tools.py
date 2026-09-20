@@ -35,6 +35,13 @@ class TimelineToolRegistry:
             "set_track_mute": self._set_track_mute,
         }
 
+    def restore_revision(self, revision: int) -> None:
+        """Restore a persisted timeline revision without creating a mutation."""
+        revision = int(revision)
+        if revision < 0:
+            raise ValueError("revision tidak boleh negatif.")
+        self.revision = revision
+
     @property
     def tool_names(self) -> tuple[str, ...]:
         return (

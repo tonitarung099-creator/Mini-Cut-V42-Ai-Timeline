@@ -29,10 +29,12 @@ from PySide6.QtWidgets import (
 )
 
 from .bridge import BridgeRouter, LocalTimelineBridge, QtBridgeDispatcher
+from .project_store import apply_project, load_project, save_project as save_project_file
 from .timeline_history import TimelineHistory
 from .timeline_model import TimelineDocument
 from .timeline_tools import TimelineToolRegistry
 from .timeline_view import TimelineView
+from .v42_state import V42WorkflowState
 
 APP_TITLE = "MiniCut V42 AI Timeline"
 
@@ -67,6 +69,9 @@ class MiniCutMainWindow(QMainWindow):
         self.tools = TimelineToolRegistry(self.document, self.history)
         self.media_durations: dict[str, int] = {}
         self.current_media: str | None = None
+        self.project_path: Path | None = None
+        self.workflow_state = V42WorkflowState()
+        self._loading_project = False
 
         # Preview has two contexts: source-bin preview and composed timeline preview.
         self.preview_mode = "source"
@@ -82,6 +87,7 @@ class MiniCutMainWindow(QMainWindow):
         self.player.setAudioOutput(self.audio_output)
 
         self._build_actions()
+        self._build_menus()
         self._build_toolbar()
         self._build_workspace()
         self._build_ai_dock()
@@ -97,8 +103,20 @@ class MiniCutMainWindow(QMainWindow):
         self.setStyleSheet(STYLE)
 
     def _build_actions(self):
+        self.action_open_project = QAction("Open Project", self)
+        self.action_open_project.setShortcut(QKeySequence.StandardKey.Open)
+        self.action_open_project.triggered.connect(self.open_project)
+
+        self.action_save_project = QAction("Save", self)
+        self.action_save_project.setShortcut(QKeySequence.StandardKey.Save)
+        self.action_save_project.triggered.connect(self.save_project)
+
+        self.action_save_project_as = QAction("Save As", self)
+        self.action_save_project_as.setShortcut(QKeySequence.StandardKey.SaveAs)
+        self.action_save_project_as.triggered.connect(self.save_project_as)
+
         self.action_import = QAction("Import", self)
-        self.action_import.setShortcut(QKeySequence.StandardKey.Open)
+        self.action_import.setShortcut(QKeySequence("Ctrl+I"))
         self.action_import.triggered.connect(self.import_media)
 
         self.action_add_timeline = QAction("Add to Timeline", self)
@@ -124,11 +142,30 @@ class MiniCutMainWindow(QMainWindow):
         self.action_export = QAction("Export", self)
         self.action_export.setEnabled(False)
 
+    def _build_menus(self):
+        file_menu = self.menuBar().addMenu("File")
+        file_menu.addAction(self.action_open_project)
+        file_menu.addAction(self.action_import)
+        file_menu.addSeparator()
+        file_menu.addAction(self.action_save_project)
+        file_menu.addAction(self.action_save_project_as)
+        file_menu.addSeparator()
+        file_menu.addAction(self.action_export)
+
+        edit_menu = self.menuBar().addMenu("Edit")
+        edit_menu.addAction(self.action_undo)
+        edit_menu.addAction(self.action_redo)
+        edit_menu.addSeparator()
+        edit_menu.addAction(self.action_split)
+        edit_menu.addAction(self.action_delete)
+
     def _build_toolbar(self):
         bar = QToolBar("Main", self)
         bar.setMovable(False)
         self.addToolBar(bar)
         for action in (
+            self.action_open_project,
+            self.action_save_project,
             self.action_import,
             self.action_add_timeline,
             self.action_split,
@@ -305,6 +342,8 @@ class MiniCutMainWindow(QMainWindow):
         return {
             "playhead_ms": self.timeline.playhead_ms,
             "preview_mode": self.preview_mode,
+            "project_path": str(self.project_path) if self.project_path else None,
+            "workflow": self.workflow_state.to_dict(),
             "imported_sources": sorted(self._allowed_bridge_sources()),
         }
 
@@ -339,6 +378,168 @@ class MiniCutMainWindow(QMainWindow):
         self.player.durationChanged.connect(self._player_duration)
         self.player.playbackStateChanged.connect(self._playback_state_changed)
         self.player.mediaStatusChanged.connect(self._media_status_changed)
+
+    def _project_media_entries(self) -> list[dict]:
+        entries: list[dict] = []
+        seen: set[str] = set()
+        for index in range(self.media_list.count()):
+            source = self.media_list.item(index).data(Qt.ItemDataRole.UserRole)
+            if not source:
+                continue
+            source = str(source)
+            if source in seen:
+                continue
+            seen.add(source)
+            entries.append(
+                {
+                    "source": source,
+                    "duration_ms": int(self.media_durations.get(source, 0)),
+                }
+            )
+        for clip in self.document.clips:
+            if clip.source and clip.source not in seen:
+                seen.add(clip.source)
+                entries.append(
+                    {
+                        "source": clip.source,
+                        "duration_ms": int(self.media_durations.get(clip.source, 0)),
+                    }
+                )
+        return entries
+
+    def save_project(self):
+        if self.project_path is None:
+            return self.save_project_as()
+        return self._save_project_to(self.project_path)
+
+    def save_project_as(self):
+        filename, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save MiniCut Project",
+            str(self.project_path or Path.home() / "project.mcutv42.json"),
+            "MiniCut V42 Project (*.mcutv42.json);;JSON (*.json)",
+        )
+        if not filename:
+            return False
+        path = Path(filename)
+        if not path.name.lower().endswith(".json"):
+            path = path.with_name(path.name + ".mcutv42.json")
+        self.project_path = path
+        return self._save_project_to(path)
+
+    def _save_project_to(self, path: Path, *, silent: bool = False) -> bool:
+        try:
+            saved = save_project_file(
+                path,
+                self.document,
+                revision=self.tools.revision,
+                playhead_ms=self.timeline.playhead_ms,
+                media=self._project_media_entries(),
+                workflow=self.workflow_state.to_dict(),
+            )
+            self.project_path = saved
+            if not silent:
+                self.statusBar().showMessage(f"Project disimpan: {saved.name}")
+            return True
+        except (OSError, ValueError, TypeError) as exc:
+            if not silent:
+                self.statusBar().showMessage(f"Gagal menyimpan project: {exc}")
+            return False
+
+    def _autosave_project(self):
+        if self._loading_project or self.project_path is None:
+            return
+        self._save_project_to(self.project_path, silent=True)
+
+    def open_project(self):
+        filename, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open MiniCut Project",
+            "",
+            "MiniCut V42 Project (*.mcutv42.json *.json);;All Files (*)",
+        )
+        if not filename:
+            return
+
+        self._stop_timeline_playback()
+        try:
+            snapshot = load_project(filename)
+            workflow = V42WorkflowState.from_dict(snapshot.workflow)
+        except (OSError, ValueError, TypeError) as exc:
+            self.statusBar().showMessage(f"Gagal membuka project: {exc}")
+            return
+
+        self._loading_project = True
+        try:
+            apply_project(
+                snapshot,
+                document=self.document,
+                history=self.history,
+                registry=self.tools,
+            )
+            self.workflow_state = workflow
+            self.project_path = Path(filename)
+
+            self.media_list.clear()
+            self.media_durations.clear()
+            for entry in snapshot.media:
+                source = str(entry["source"])
+                item = QListWidgetItem(Path(source).name)
+                item.setToolTip(source)
+                item.setData(Qt.ItemDataRole.UserRole, source)
+                self.media_list.addItem(item)
+                self.media_durations[source] = int(entry.get("duration_ms", 0))
+
+            # Ensure timeline-only sources also remain discoverable in the media bin.
+            known = {
+                str(self.media_list.item(i).data(Qt.ItemDataRole.UserRole))
+                for i in range(self.media_list.count())
+            }
+            for clip in self.document.clips:
+                if not clip.source or clip.source in known:
+                    continue
+                known.add(clip.source)
+                item = QListWidgetItem(Path(clip.source).name)
+                item.setToolTip(clip.source)
+                item.setData(Qt.ItemDataRole.UserRole, clip.source)
+                self.media_list.addItem(item)
+
+            self.current_media = None
+            self.preview_mode = "timeline"
+            self.preview_clip_id = None
+            self.timeline.set_document(self.document)
+            target = min(snapshot.playhead_ms, self.document.duration_ms)
+            self.timeline.set_playhead(target)
+            self.timeline.clear_selection()
+            self._clear_inspector()
+            self._timeline_changed()
+            self._sync_timeline_preview(target, autoplay=False, force_seek=True)
+
+            if snapshot.missing_sources:
+                self.statusBar().showMessage(
+                    f"Project dibuka · {len(snapshot.missing_sources)} media belum ditemukan."
+                )
+            else:
+                self.statusBar().showMessage(f"Project dibuka: {self.project_path.name}")
+        finally:
+            self._loading_project = False
+
+    def record_v42_checkpoint(
+        self,
+        checkpoint_id: str,
+        *,
+        block_id: str | None = None,
+        unit_id: str | None = None,
+        payload: dict | None = None,
+    ) -> None:
+        self.workflow_state.record_checkpoint(
+            checkpoint_id,
+            timeline_revision=self.tools.revision,
+            block_id=block_id,
+            unit_id=unit_id,
+            payload=payload,
+        )
+        self._autosave_project()
 
     def import_media(self):
         files, _ = QFileDialog.getOpenFileNames(
@@ -567,6 +768,7 @@ class MiniCutMainWindow(QMainWindow):
                 autoplay=self._timeline_playing,
                 force_seek=True,
             )
+        self._autosave_project()
         if message:
             self.statusBar().showMessage(message)
 
@@ -819,6 +1021,7 @@ class MiniCutMainWindow(QMainWindow):
         assert self.local_bridge is not None
         assert self.local_bridge.running
         assert self.local_bridge.url.startswith("http://127.0.0.1:")
+        assert isinstance(self.workflow_state, V42WorkflowState)
         assert self._timeline_timer.interval() == 33
         self.statusBar().showMessage("SELF TEST PASS")
 
