@@ -107,6 +107,42 @@ class TimelinePlanManagerTests(unittest.TestCase):
         self.assertEqual(self.registry.revision, 0)
         self.assertIsNotNone(manager.pending)
 
+    def test_whole_plan_validator_runs_on_propose_and_apply(self):
+        allowed = {"ok": True}
+        calls = []
+
+        def plan_validator(plan):
+            calls.append(plan.id)
+            if not allowed["ok"]:
+                return "whole plan stale"
+            return None
+
+        manager = TimelinePlanManager(
+            self.registry,
+            plan_validator=plan_validator,
+        )
+        proposed = manager.propose(self._plan())
+        self.assertTrue(proposed["ok"])
+        self.assertEqual(len(calls), 1)
+
+        allowed["ok"] = False
+        applied = manager.apply()
+        self.assertFalse(applied["ok"])
+        self.assertEqual(applied["error"]["code"], "plan_revalidation_failed")
+        self.assertEqual(self.doc.clips, [])
+        self.assertIsNotNone(manager.pending)
+        self.assertEqual(len(calls), 2)
+
+    def test_whole_plan_validator_can_reject_proposal(self):
+        manager = TimelinePlanManager(
+            self.registry,
+            plan_validator=lambda plan: "unsafe aggregate",
+        )
+        result = manager.propose(self._plan())
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"]["code"], "plan_validation_failed")
+        self.assertIsNone(manager.pending)
+
     def test_cancel_keeps_timeline_untouched(self):
         self.manager.propose(self._plan())
         result = self.manager.cancel()
