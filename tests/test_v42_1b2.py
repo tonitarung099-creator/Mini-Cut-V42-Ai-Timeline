@@ -89,6 +89,7 @@ class OneB2ParserTests(unittest.TestCase):
         self.assertEqual(plan.work_queue, ["J-001", "N-001"])
         self.assertEqual(len(plan.units["J-001"].candidate_ranges), 2)
         self.assertEqual(len(plan.units["N-001"].candidate_ranges), 1)
+        self.assertEqual(plan.units["N-001"].candidate_ranges[0].location, "Kantor")
         self.assertEqual(plan.units["N-001"].block_id, "B-001")
         self.assertEqual(plan.blocks["B-001"].work_order, ["J-001", "N-001"])
         self.assertEqual(
