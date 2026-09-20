@@ -2405,7 +2405,6 @@ class MiniCutMainWindow(QMainWindow):
             self._refresh_narration_status()
         if hasattr(self, "ai_replace_selected_visual"):
             self._refresh_prompt3_revision_button()
-        self._refresh_prompt3_revision_button()
 
     def _apply_ai_plan(self):
         plan = self.plan_manager.pending
