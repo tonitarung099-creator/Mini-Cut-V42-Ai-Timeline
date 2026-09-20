@@ -23,11 +23,11 @@
 - Persistent V42 ownership metadata on timeline clips: VERIFIED.
 - Gemini verification → validated review-first timeline-plan conversion: VERIFIED.
 - Display-order V42 timeline regions + atomic reflow: VERIFIED and merged.
-- Prompt 1B1 final narration parser: IMPLEMENTED in current milestone; CI verification required.
-- Narration SRT → N-unit monotonic mapper: IMPLEMENTED in current milestone; CI verification required.
-- Local FFmpeg waveform/silence safe-padding analysis: IMPLEMENTED in current milestone; CI verification required.
-- Review-first A2 narration audio placement: IMPLEMENTED in current milestone; CI verification required.
-- Prompt 3 visual-duration fitting to authoritative A2: NOT STARTED.
+- Prompt 1B1 final narration parser: VERIFIED and merged.
+- Narration SRT → N-unit monotonic mapper: VERIFIED and merged.
+- Local FFmpeg waveform/silence safe-padding analysis: VERIFIED and merged.
+- Review-first A2 narration audio placement: VERIFIED and merged.
+- Prompt 3 visual-duration fitting to authoritative A2: IMPLEMENTED in current milestone; CI verification required.
 - Full Prompt 2 anchor dialog/action/campuran orchestration: NOT STARTED.
 - Targeted replace/revision of an existing unit: NOT STARTED.
 - Prompt 4 block auditor: NOT STARTED.
@@ -46,22 +46,17 @@ Prompt 3 narration timing is local and evidence-based:
 
 ## Current milestone
 
-MiniCut can import the final Prompt 1B1 narration script, narration audio and narration SRT. The local mapper supports explicit N-xxx labels, including unlabeled continuation cues, and otherwise uses chronological text matching. Weak mappings are rejected rather than guessed. FFmpeg silencedetect runs only around each narration unit, not across the whole audio repeatedly. The resulting safe-padded source range can be converted into a normal pending TimelinePlan that places narration audio on A2 and reflows later display-order units in the same atomic Apply/Undo operation.
+Narration audio timing is already verified. The current branch makes that timing authoritative for N visuals. Gemini receives the final narration text and A2 duration but only makes semantic keep/trim/reject decisions. Local MiniCut then fits verified source ranges under V42: chronological source order, <=0.50x speed, >=2.00s per final piece, film audio muted, and exact equality between total V2 duration and safe-padded A2 duration. Impossible fits become needs_revision rather than speeding above 0.50x.
 
-Narration timing data and asset references are stored in durable V42 workflow checkpoints. Live region layout uses those narration durations as overrides even before A2 is applied, so N region duration no longer needs to be inferred from selected visuals once timing analysis is available.
+Prompt 3 visual plans receive whole-plan revalidation. Immediately before Apply, MiniCut rebuilds the deterministic expected actions from current evidence, Gemini checkpoint, narration timing and timeline state; the pending actions must still match exactly.
 
 ## Next technically justified action
 
 After this milestone passes CI:
 
-1. make visual N plan generation read the authoritative A2/N-region duration;
-2. implement deterministic Prompt 3 visual fitting:
-   - keep source chronology;
-   - minimum visual piece duration;
-   - default slow-down policy when selected source is too short;
-   - freeze/hold fallback only when needed;
-   - preserve handoff into following J unit;
-3. ensure film source audio remains muted under narration;
-4. add targeted visual replacement inside an existing N region;
-5. implement Prompt 2 Jangkar mode rules;
-6. implement Prompt 4 audit and Prompt 5/final export.
+1. add a real freeze/hold timeline primitive with correct preview/export semantics;
+2. parse/normalize Prompt 1B2 phrase-function metadata (VISUAL PRESISI / HANDOFF / CAMPURAN) into structured fields;
+3. validate N→J handoff and protect J core moments during candidate selection;
+4. add targeted replacement of one faulty visual inside an existing N region;
+5. implement Prompt 2 Jangkar dialog/action/campuran orchestration;
+6. implement Prompt 4 block audit and Prompt 5/final export.
