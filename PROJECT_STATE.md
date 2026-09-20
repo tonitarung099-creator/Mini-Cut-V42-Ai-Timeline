@@ -1,6 +1,6 @@
 # Current Verified State
 
-- Remote repository: `tonitarung099-creator/Mini-Cut-V42-Ai-Timeline`.
+- Remote repository: `tonitarung099-creator/Mini-Cut-V42-AI-Timeline`.
 - Final packaged MiniCut behavioral reference: VERIFIED and documented.
 - Clean modular PySide6 desktop source: IMPLEMENTED.
 - Filmora-like workspace shell: VERIFIED by Windows CI.
@@ -16,28 +16,28 @@
 - Project save/load + autosave + durable V42 checkpoints: VERIFIED.
 - Review-first AI Plan / Review / Apply layer: VERIFIED.
 - V42 1B2 parser/import + durable normalized plan: VERIFIED.
-- Candidate-constrained local shot/camera-cut detection: VERIFIED and merged.
-- Sparse frame extraction + SRT overlap evidence packets: IMPLEMENTED in current milestone; CI verification required.
-- Gemini multi-key manager/failover reconstruction: NOT STARTED.
-- Gemini evidence request/response schema: NOT STARTED.
+- Candidate-constrained local shot/camera-cut detection: VERIFIED.
+- Sparse frame extraction + SRT overlap evidence packets: VERIFIED and merged.
+- Gemini local key pool (up to 100) + health/cooldown/failover: IMPLEMENTED in current milestone; CI verification required.
+- Gemini evidence request/response client: NOT STARTED.
 - V42 Prompt 2–5 workflow engine: NOT STARTED.
 - Final FFmpeg/SmartCut export reconstruction: NOT STARTED.
 
 ## Architecture rule
 
-The timeline remains the single source of truth. 1B2 constrains where local analysis may inspect the film. Local shot detection narrows those ranges, then sparse frame + SRT packets provide compact evidence. No cloud provider receives continuous video by default.
+Project/timeline/evidence state is independent from API sessions. Gemini keys are local credentials, never project data. Provider failures may rotate keys but must never discard V42 checkpoints or mutate the timeline outside the review-first plan layer.
 
 ## Current milestone
 
-For an active N/J unit with local shot analysis, MiniCut extracts up to three small JPEG frames per shot and attaches only overlapping SRT cues. Frames are cached locally. A durable `evidence-<UNIT>` checkpoint stores packet metadata and identity hashes; bridge state exposes only a compact summary.
+MiniCut can import and store up to 100 Gemini API keys locally, deduplicate them, rotate ready keys round-robin, cool down quota/transient failures, disable authentication-failed keys, and expose only aggregate key health to the local bridge.
 
 ## Next technically justified action
 
-After evidence-packet CI passes:
+After Gemini key-pool CI passes:
 
-1. implement Gemini API key pool supporting many keys without storing secrets in project files,
-2. add per-key health/cooldown/quota state and automatic failover,
-3. define bounded Gemini request batches over evidence packets,
-4. validate structured Gemini decisions against 1B2/V42 and convert them to review-first AI plans,
-5. implement Prompt 2–5 orchestration,
-6. reconstruct final FFmpeg/SmartCut export.
+1. implement a Gemini REST client against the current supported API,
+2. send bounded evidence batches with images + compact shot/SRT metadata,
+3. enforce structured JSON response schemas for shot decisions,
+4. retry/fail over through the local key pool,
+5. convert validated decisions into review-first timeline plans,
+6. implement V42 Prompt 2–5 orchestration and final export.
