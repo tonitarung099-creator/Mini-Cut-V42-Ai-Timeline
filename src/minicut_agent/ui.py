@@ -37,6 +37,12 @@ from .evidence_packets import (
     load_srt,
     suggest_srt_for_video,
 )
+from .gemini_keys import (
+    GeminiKeyPool,
+    import_key_file,
+    load_key_store,
+    save_key_store,
+)
 from .project_store import apply_project, load_project, save_project as save_project_file
 from .shot_detection import UnitShotAnalysis, analyze_unit_candidates
 from .timeline_history import TimelineHistory
@@ -146,6 +152,12 @@ class MiniCutMainWindow(QMainWindow):
         self.workflow_state = V42WorkflowState()
         self.v42_1b2_plan: V42OneB2Plan | None = None
         self.film_srt_path: Path | None = None
+        self._gemini_key_load_error = ""
+        try:
+            self.gemini_key_pool = load_key_store()
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+            self.gemini_key_pool = GeminiKeyPool()
+            self._gemini_key_load_error = str(exc)
         self._shot_worker: ShotDetectionWorker | None = None
         self._evidence_worker: EvidencePacketWorker | None = None
         self._loading_project = False
@@ -399,6 +411,11 @@ class MiniCutMainWindow(QMainWindow):
         self.ai_build_evidence.setEnabled(False)
         self.ai_build_evidence.clicked.connect(self._build_active_unit_evidence)
 
+        self.ai_gemini_key_status = QLabel("Gemini keys: 0 / 100")
+        self.ai_gemini_key_status.setObjectName("StatusPill")
+        self.ai_import_gemini_keys = QPushButton("Import Gemini Keys")
+        self.ai_import_gemini_keys.clicked.connect(self.import_gemini_keys)
+
         self.ai_input = QPlainTextEdit()
         self.ai_input.setPlaceholderText(
             "Nanti: “Kerjakan B-001”, “Cari visual lain untuk N-007”, dll."
@@ -435,6 +452,8 @@ class MiniCutMainWindow(QMainWindow):
         layout.addWidget(self.ai_import_srt)
         layout.addWidget(self.ai_evidence_status)
         layout.addWidget(self.ai_build_evidence)
+        layout.addWidget(self.ai_gemini_key_status)
+        layout.addWidget(self.ai_import_gemini_keys)
         layout.addWidget(self.ai_input)
         layout.addWidget(QLabel("AI Plan / Review"))
         layout.addWidget(self.ai_plan_view)
@@ -442,6 +461,7 @@ class MiniCutMainWindow(QMainWindow):
         layout.addWidget(self.ai_run)
         dock.setWidget(panel)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
+        self._refresh_gemini_key_status()
         self._refresh_ai_plan()
 
     def import_1b2_plan(self):
@@ -944,6 +964,60 @@ class MiniCutMainWindow(QMainWindow):
                 f"{summary['image_bytes'] / (1024 * 1024):.2f} MB"
             )
 
+    def import_gemini_keys(self):
+        filename, _ = QFileDialog.getOpenFileName(
+            self,
+            "Import Gemini API Keys",
+            "",
+            "Text (*.txt *.keys);;All Files (*)",
+        )
+        if not filename:
+            return
+
+        before = self.gemini_key_pool.summary()["total"]
+        try:
+            import_key_file(filename, existing=self.gemini_key_pool)
+            save_key_store(self.gemini_key_pool)
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+            self.statusBar().showMessage(f"Gagal import Gemini keys: {exc}")
+            self._refresh_gemini_key_status()
+            return
+
+        after = self.gemini_key_pool.summary()["total"]
+        added = max(0, after - before)
+        self._gemini_key_load_error = ""
+        self._refresh_gemini_key_status()
+        self.statusBar().showMessage(
+            f"Gemini keys tersimpan lokal · {after}/100 · {added} key baru."
+        )
+
+    def _refresh_gemini_key_status(self):
+        if not hasattr(self, "ai_gemini_key_status"):
+            return
+        summary = self.gemini_key_pool.summary()
+        if self._gemini_key_load_error:
+            self.ai_gemini_key_status.setText(
+                f"Gemini keys: gagal memuat store · {summary['total']}/100"
+            )
+            return
+        self.ai_gemini_key_status.setText(
+            "Gemini keys · "
+            f"{summary['total']}/100 · "
+            f"{summary['ready']} ready · "
+            f"{summary['cooldown']} cooldown · "
+            f"{summary['disabled']} disabled"
+        )
+
+    def _gemini_key_public_summary(self) -> dict:
+        summary = self.gemini_key_pool.summary()
+        return {
+            "total": summary["total"],
+            "ready": summary["ready"],
+            "cooldown": summary["cooldown"],
+            "disabled": summary["disabled"],
+            "max_keys": summary["max_keys"],
+        }
+
     def _start_local_bridge(self):
         try:
             self.bridge_router = BridgeRouter(
@@ -1120,6 +1194,7 @@ class MiniCutMainWindow(QMainWindow):
                     ) is not None,
                 }
             ),
+            "gemini_keys": self._gemini_key_public_summary(),
             "imported_sources": sorted(self._allowed_bridge_sources()),
         }
 
@@ -1812,6 +1887,9 @@ class MiniCutMainWindow(QMainWindow):
         assert self.ai_import_srt is not None
         assert self.ai_evidence_status is not None
         assert self.ai_build_evidence is not None
+        assert isinstance(self.gemini_key_pool, GeminiKeyPool)
+        assert self.ai_gemini_key_status is not None
+        assert self.ai_import_gemini_keys is not None
         assert self._timeline_timer.interval() == 33
         self.statusBar().showMessage("SELF TEST PASS")
 
