@@ -251,6 +251,42 @@ def apply_batch(
 
 
 @mcp.tool()
+def propose_plan(
+    title: str,
+    actions: list[dict[str, Any]],
+    expected_revision: int,
+    explanation: str = "",
+    block_id: str = "",
+    unit_id: str = "",
+) -> dict[str, Any]:
+    """Submit a review-only AI edit plan. This does not mutate the timeline."""
+    return _execute(
+        "propose_plan",
+        {
+            "title": title,
+            "actions": actions,
+            "expected_revision": expected_revision,
+            "explanation": explanation,
+            "block_id": block_id or None,
+            "unit_id": unit_id or None,
+            "created_by": "mcp",
+        },
+    )
+
+
+@mcp.tool()
+def get_pending_plan() -> dict[str, Any]:
+    """Read the AI plan currently waiting for user review."""
+    return _execute("get_pending_plan", {})
+
+
+@mcp.tool()
+def cancel_plan() -> dict[str, Any]:
+    """Cancel the AI plan currently waiting for review without editing timeline."""
+    return _execute("cancel_plan", {})
+
+
+@mcp.tool()
 def undo(expected_revision: int | None = None) -> dict[str, Any]:
     """Undo the latest timeline transaction."""
     return _execute("undo", expected_revision=expected_revision)
