@@ -123,6 +123,25 @@ class GeminiClientTests(unittest.TestCase):
             encoded = json.dumps(body)
             self.assertNotIn(str(Path(temp)), encoded)
 
+    def test_prompt3_target_duration_is_in_gemini_evidence_prompt(self):
+        with tempfile.TemporaryDirectory() as temp:
+            packet = self.packet(Path(temp), shots=1)
+            batch = build_evidence_batches(packet)[0]
+            body = build_interaction_body(
+                packet,
+                batch,
+                model="gemini-test",
+                unit_context={
+                    "prompt3_target_duration_ms": 12345,
+                    "prompt3_narration_text": "teks final",
+                },
+            )
+            prompt = body["input"][0]["text"]
+            self.assertIn("12345 ms", prompt)
+            self.assertIn("speed <=0.50x", prompt)
+            self.assertIn(">=2000 ms", prompt)
+            self.assertIn("strictly chronological", prompt)
+
     def test_parse_response_rejects_missing_shot(self):
         with tempfile.TemporaryDirectory() as temp:
             packet = self.packet(Path(temp), shots=2)
