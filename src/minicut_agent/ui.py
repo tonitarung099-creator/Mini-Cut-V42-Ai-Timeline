@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
 
 from .timeline_history import TimelineHistory
 from .timeline_model import TimelineDocument
+from .timeline_tools import TimelineToolRegistry
 from .timeline_view import TimelineView
 
 APP_TITLE = "MiniCut V42 AI Timeline"
@@ -62,6 +63,7 @@ class MiniCutMainWindow(QMainWindow):
 
         self.document = TimelineDocument.default()
         self.history = TimelineHistory(self.document)
+        self.tools = TimelineToolRegistry(self.document, self.history)
         self.media_durations: dict[str, int] = {}
         self.current_media: str | None = None
 
@@ -319,40 +321,56 @@ class MiniCutMainWindow(QMainWindow):
             )
             return
 
-        self.history.checkpoint()
         group_id = "media-" + uuid4().hex[:10]
         start = self.document.next_free_time("V1")
-        self.document.insert_clip(
-            source=path,
-            track_id="V1",
-            source_in_ms=0,
-            source_out_ms=duration,
-            timeline_start_ms=start,
-            group_id=group_id,
-            label=Path(path).name,
+        result = self.tools.execute_batch(
+            [
+                {
+                    "tool": "insert_clip",
+                    "args": {
+                        "source": path,
+                        "track_id": "V1",
+                        "source_in_ms": 0,
+                        "source_out_ms": duration,
+                        "timeline_start_ms": start,
+                        "group_id": group_id,
+                        "label": Path(path).name,
+                    },
+                },
+                {
+                    "tool": "insert_clip",
+                    "args": {
+                        "source": path,
+                        "track_id": "A1",
+                        "source_in_ms": 0,
+                        "source_out_ms": duration,
+                        "timeline_start_ms": start,
+                        "group_id": group_id,
+                        "label": Path(path).name + " · audio",
+                    },
+                },
+            ],
+            expected_revision=self.tools.revision,
         )
-        self.document.insert_clip(
-            source=path,
-            track_id="A1",
-            source_in_ms=0,
-            source_out_ms=duration,
-            timeline_start_ms=start,
-            group_id=group_id,
-            label=Path(path).name + " · audio",
-        )
+        if not result["ok"]:
+            self.statusBar().showMessage(self._tool_error_message(result))
+            return
         self._timeline_changed(f"Ditambahkan ke timeline: {Path(path).name}")
 
     def split_selected_clip(self):
         clip_id = self.timeline.selected_clip_id
         if not clip_id:
             return
-        try:
-            self.history.checkpoint()
-            self.document.split_linked_at(clip_id, self.timeline.playhead_ms)
-        except (ValueError, KeyError) as exc:
-            # Discard no-op checkpoint by undoing it without exposing it to the user.
-            self.history.cancel_checkpoint()
-            self.statusBar().showMessage(str(exc))
+        result = self.tools.execute(
+            "split_clip",
+            {
+                "clip_id": clip_id,
+                "timeline_ms": self.timeline.playhead_ms,
+                "expected_revision": self.tools.revision,
+            },
+        )
+        if not result["ok"]:
+            self.statusBar().showMessage(self._tool_error_message(result))
             self._refresh_edit_actions()
             return
         self.timeline.clear_selection()
@@ -363,45 +381,51 @@ class MiniCutMainWindow(QMainWindow):
         clip_id = self.timeline.selected_clip_id
         if not clip_id:
             return
-        try:
-            self.history.checkpoint()
-            removed = self.document.remove_linked(clip_id)
-        except (ValueError, KeyError) as exc:
-            self.history.cancel_checkpoint()
-            self.statusBar().showMessage(str(exc))
+        result = self.tools.execute(
+            "delete_clip",
+            {
+                "clip_id": clip_id,
+                "expected_revision": self.tools.revision,
+            },
+        )
+        if not result["ok"]:
+            self.statusBar().showMessage(self._tool_error_message(result))
             self._refresh_edit_actions()
             return
+        removed = result["result"]
         self.timeline.clear_selection()
         self._clear_inspector()
         self._timeline_changed(f"{len(removed)} linked clip dihapus.")
 
     def _move_clip_requested(self, clip_id: str, track_id: str, timeline_start_ms: int):
-        try:
-            self.history.checkpoint()
-            self.document.move_linked(
-                clip_id,
-                track_id=track_id,
-                timeline_start_ms=timeline_start_ms,
-            )
-        except (ValueError, KeyError) as exc:
-            self.history.cancel_checkpoint()
-            self.statusBar().showMessage(str(exc))
+        result = self.tools.execute(
+            "move_clip",
+            {
+                "clip_id": clip_id,
+                "track_id": track_id,
+                "timeline_start_ms": timeline_start_ms,
+                "expected_revision": self.tools.revision,
+            },
+        )
+        if not result["ok"]:
+            self.statusBar().showMessage(self._tool_error_message(result))
             self._refresh_edit_actions()
             return
         self._clip_selected(clip_id)
         self._timeline_changed("Clip digeser.")
 
     def _trim_clip_requested(self, clip_id: str, edge: str, timeline_ms: int):
-        try:
-            self.history.checkpoint()
-            self.document.trim_linked(
-                clip_id,
-                edge=edge,
-                timeline_ms=timeline_ms,
-            )
-        except (ValueError, KeyError) as exc:
-            self.history.cancel_checkpoint()
-            self.statusBar().showMessage(str(exc))
+        result = self.tools.execute(
+            "trim_clip",
+            {
+                "clip_id": clip_id,
+                "edge": edge,
+                "timeline_ms": timeline_ms,
+                "expected_revision": self.tools.revision,
+            },
+        )
+        if not result["ok"]:
+            self.statusBar().showMessage(self._tool_error_message(result))
             self._refresh_edit_actions()
             return
 
@@ -410,41 +434,58 @@ class MiniCutMainWindow(QMainWindow):
         self._timeline_changed(f"Trim {side} berhasil.")
 
     def _track_control_requested(self, track_id: str, control: str):
-        try:
-            self.history.checkpoint()
-            if control == "lock":
-                state = self.document.toggle_track_lock(track_id)
-                message = f"{track_id} {'dikunci' if state else 'dibuka'}."
-            elif control == "visibility":
-                state = self.document.toggle_track_visibility(track_id)
-                message = f"{track_id} {'ditampilkan' if state else 'disembunyikan'}."
-            elif control == "mute":
-                state = self.document.toggle_track_mute(track_id)
-                message = f"{track_id} {'mute' if state else 'audio aktif'}."
-            else:
-                raise ValueError(f"Kontrol track tidak dikenal: {control}")
-        except (ValueError, KeyError) as exc:
-            self.history.cancel_checkpoint()
-            self.statusBar().showMessage(str(exc))
-            self._refresh_edit_actions()
+        track = self.document.track(track_id)
+        if control == "lock":
+            state = not track.locked
+            tool = "set_track_lock"
+            args = {"track_id": track_id, "locked": state}
+            message = f"{track_id} {'dikunci' if state else 'dibuka'}."
+        elif control == "visibility":
+            state = not track.visible
+            tool = "set_track_visibility"
+            args = {"track_id": track_id, "visible": state}
+            message = f"{track_id} {'ditampilkan' if state else 'disembunyikan'}."
+        elif control == "mute":
+            state = not track.muted
+            tool = "set_track_mute"
+            args = {"track_id": track_id, "muted": state}
+            message = f"{track_id} {'mute' if state else 'audio aktif'}."
+        else:
+            self.statusBar().showMessage(f"Kontrol track tidak dikenal: {control}")
             return
 
+        args["expected_revision"] = self.tools.revision
+        result = self.tools.execute(tool, args)
+        if not result["ok"]:
+            self.statusBar().showMessage(self._tool_error_message(result))
+            self._refresh_edit_actions()
+            return
         self._timeline_changed(message)
 
     def undo_timeline(self):
-        if self.history.undo():
+        result = self.tools.execute(
+            "undo",
+            {"expected_revision": self.tools.revision},
+        )
+        if result["ok"]:
             self.timeline.clear_selection()
             self._clear_inspector()
             self._timeline_changed("Undo.")
         else:
+            self.statusBar().showMessage(self._tool_error_message(result))
             self._refresh_edit_actions()
 
     def redo_timeline(self):
-        if self.history.redo():
+        result = self.tools.execute(
+            "redo",
+            {"expected_revision": self.tools.revision},
+        )
+        if result["ok"]:
             self.timeline.clear_selection()
             self._clear_inspector()
             self._timeline_changed("Redo.")
         else:
+            self.statusBar().showMessage(self._tool_error_message(result))
             self._refresh_edit_actions()
 
     def _timeline_changed(self, message: str = ""):
@@ -467,6 +508,14 @@ class MiniCutMainWindow(QMainWindow):
         self.action_delete.setEnabled(selected)
         self.action_undo.setEnabled(self.history.can_undo)
         self.action_redo.setEnabled(self.history.can_redo)
+        if hasattr(self, "ai_status"):
+            self.ai_status.setText(
+                f"Local timeline tools ready · rev {self.tools.revision}"
+            )
+
+    @staticmethod
+    def _tool_error_message(result: dict) -> str:
+        return str(result.get("error", {}).get("message", "Timeline tool gagal."))
 
     def toggle_play(self):
         if self.preview_mode == "timeline":
@@ -697,6 +746,8 @@ class MiniCutMainWindow(QMainWindow):
         assert self.video is not None
         assert self.findChild(QDockWidget, "AIAgentDock") is not None
         assert self.history.document is self.document
+        assert self.tools.document is self.document
+        assert "trim_clip" in self.tools.tool_names
         assert self._timeline_timer.interval() == 33
         self.statusBar().showMessage("SELF TEST PASS")
 
