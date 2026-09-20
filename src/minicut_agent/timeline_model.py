@@ -285,6 +285,37 @@ class TimelineDocument:
         self._sort_clips()
         return targets
 
+    def toggle_track_lock(self, track_id: str) -> bool:
+        track = self.track(track_id)
+        track.locked = not track.locked
+        return track.locked
+
+    def toggle_track_visibility(self, track_id: str) -> bool:
+        track = self.track(track_id)
+        if track.kind == "audio":
+            raise ValueError("Audio memakai kontrol mute, bukan visibility.")
+        track.visible = not track.visible
+        return track.visible
+
+    def toggle_track_mute(self, track_id: str) -> bool:
+        track = self.track(track_id)
+        if track.kind != "audio":
+            raise ValueError("Mute track hanya tersedia untuk audio.")
+        track.muted = not track.muted
+        return track.muted
+
+    def audio_muted_for_video_clip(self, video_clip_id: str, timeline_ms: int) -> bool:
+        video = self.clip(video_clip_id)
+        if video.muted:
+            return True
+        for linked in self.linked_clips(video_clip_id):
+            track = self.track(linked.track_id)
+            if track.kind != "audio":
+                continue
+            if linked.covers_timeline_time(timeline_ms):
+                return linked.muted or track.muted
+        return False
+
     def clips_at(self, timeline_ms: int, *, kind: TrackKind | None = None) -> list[TimelineClip]:
         """Return visible clips covering timeline_ms ordered top-track first."""
         candidates: list[TimelineClip] = []
