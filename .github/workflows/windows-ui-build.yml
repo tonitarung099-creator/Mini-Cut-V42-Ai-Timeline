@@ -35,10 +35,19 @@ jobs:
           $env:PYTHONPATH="src"
           $env:QT_QPA_PLATFORM="offscreen"
           python src/main.py --self-test
-      - name: Build Windows executable
+      - name: MCP import smoke test
+        shell: pwsh
+        run: |
+          $env:PYTHONPATH="src"
+          python -c "import minicut_mcp; print('MCP IMPORT PASS')"
+      - name: Build Windows desktop executable
         shell: pwsh
         run: |
           pyinstaller --noconfirm --clean --windowed --name "MiniCut V42 AI Timeline" --paths src --collect-all PySide6 --hidden-import PySide6.QtMultimedia --hidden-import PySide6.QtMultimediaWidgets src/main.py
+      - name: Build MCP companion executable
+        shell: pwsh
+        run: |
+          pyinstaller --noconfirm --clean --console --name "MiniCut MCP" --paths src src/minicut_mcp.py
       - uses: actions/upload-artifact@v4
         with:
           name: minicut-v42-filmora-ui

@@ -37,11 +37,10 @@ Track and clip locks remain authoritative. The registry cannot bypass them.
 
 Manual actions for add-to-timeline, move, trim, split, delete, track controls, undo and redo are routed through the same registry. This prevents a future AI path from developing different editing semantics than the human editing path.
 
-## Next layer
+## Local bridge integration
 
-A local bridge will expose a restricted subset of this registry to the AI/MCP process. The bridge must:
-- return `revision` with project state,
-- require/accept `expected_revision` for mutations,
-- preserve batch atomicity,
-- never expose unrestricted filesystem or shell execution,
-- notify the Qt UI after successful external mutations.
+The registry is exposed through a token-authenticated localhost bridge. It returns `revision` with project state, preserves atomic batches, rejects stale revisions, restricts inserted media to imported project sources, and notifies the Qt UI after successful external mutations.
+
+The MCP companion proxies timeline-native tools to this bridge. It does not receive unrestricted filesystem, shell, or FFmpeg execution access.
+
+See `LOCAL_TIMELINE_BRIDGE.md`.

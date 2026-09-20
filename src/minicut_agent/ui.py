@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .bridge import BridgeRouter, LocalTimelineBridge, QtBridgeDispatcher
 from .timeline_history import TimelineHistory
 from .timeline_model import TimelineDocument
 from .timeline_tools import TimelineToolRegistry
@@ -87,7 +88,12 @@ class MiniCutMainWindow(QMainWindow):
         self._connect_player()
         self._refresh_edit_actions()
 
-        self.statusBar().showMessage("Siap · timeline manual aktif")
+        self.bridge_router = None
+        self.bridge_dispatcher = None
+        self.local_bridge = None
+        self._start_local_bridge()
+
+        self.statusBar().showMessage("Siap · timeline manual + bridge lokal aktif")
         self.setStyleSheet(STYLE)
 
     def _build_actions(self):
@@ -265,6 +271,68 @@ class MiniCutMainWindow(QMainWindow):
         layout.addWidget(self.ai_run)
         dock.setWidget(panel)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
+
+    def _start_local_bridge(self):
+        try:
+            self.bridge_router = BridgeRouter(
+                self.tools,
+                state_provider=self._bridge_state,
+                seek_handler=self._bridge_seek,
+                allowed_sources_provider=self._allowed_bridge_sources,
+                mutation_callback=self._bridge_mutation,
+            )
+            self.bridge_dispatcher = QtBridgeDispatcher(
+                self.bridge_router,
+                parent=self,
+            )
+            self.local_bridge = LocalTimelineBridge(self.bridge_dispatcher)
+            url = self.local_bridge.start()
+            self.ai_status.setText(f"Bridge lokal aktif · {url} · AI cloud belum terhubung")
+        except Exception as exc:
+            self.local_bridge = None
+            self.ai_status.setText("Bridge lokal gagal aktif")
+            self.statusBar().showMessage(f"Bridge lokal gagal: {exc}")
+
+    def _allowed_bridge_sources(self) -> set[str]:
+        sources = {clip.source for clip in self.document.clips}
+        for index in range(self.media_list.count()):
+            path = self.media_list.item(index).data(Qt.ItemDataRole.UserRole)
+            if path:
+                sources.add(str(path))
+        return sources
+
+    def _bridge_state(self) -> dict:
+        return {
+            "playhead_ms": self.timeline.playhead_ms,
+            "preview_mode": self.preview_mode,
+            "imported_sources": sorted(self._allowed_bridge_sources()),
+        }
+
+    def _bridge_seek(self, milliseconds: int) -> dict:
+        target = max(0, min(int(milliseconds), self.document.duration_ms))
+        self.timeline.set_playhead(target)
+        self._timeline_seek(target)
+        return {"playhead_ms": target}
+
+    def _bridge_mutation(self):
+        selected = self.timeline.selected_clip_id
+        if selected:
+            try:
+                self.document.clip(selected)
+            except KeyError:
+                self.timeline.clear_selection()
+                self._clear_inspector()
+        self._timeline_changed("Timeline diperbarui lewat AI/MCP lokal.")
+
+    def shutdown(self):
+        bridge = getattr(self, "local_bridge", None)
+        if bridge is not None:
+            bridge.stop()
+            self.local_bridge = None
+
+    def closeEvent(self, event):
+        self.shutdown()
+        super().closeEvent(event)
 
     def _connect_player(self):
         self.player.positionChanged.connect(self._player_position)
@@ -748,6 +816,9 @@ class MiniCutMainWindow(QMainWindow):
         assert self.history.document is self.document
         assert self.tools.document is self.document
         assert "trim_clip" in self.tools.tool_names
+        assert self.local_bridge is not None
+        assert self.local_bridge.running
+        assert self.local_bridge.url.startswith("http://127.0.0.1:")
         assert self._timeline_timer.interval() == 33
         self.statusBar().showMessage("SELF TEST PASS")
 
@@ -756,6 +827,7 @@ def run(argv: list[str] | None = None) -> int:
     argv = list(sys.argv if argv is None else argv)
     app = QApplication(argv)
     window = MiniCutMainWindow()
+    app.aboutToQuit.connect(window.shutdown)
     window.show()
     if "--self-test" in argv:
         QTimer.singleShot(80, window.run_self_test)
