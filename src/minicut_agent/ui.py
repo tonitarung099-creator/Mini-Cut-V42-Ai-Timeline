@@ -1851,7 +1851,23 @@ class MiniCutMainWindow(QMainWindow):
                 narration_target_duration_ms=narration_target,
             )
         except V42PlanBuildError as exc:
-            self.statusBar().showMessage(f"AI plan tidak dibuat: {exc}")
+            message = str(exc)
+            if "PERLU REVISI" in message.upper():
+                unit = plan.units.get(unit_id)
+                self.workflow_state.set_unit_status(
+                    unit_id,
+                    "needs_revision",
+                    block_id=(None if unit is None else unit.block_id),
+                    timeline_revision=self.tools.revision,
+                    note=message,
+                )
+                self.record_v42_checkpoint(
+                    f"prompt3-revision-{unit_id}",
+                    block_id=(None if unit is None else unit.block_id),
+                    unit_id=unit_id,
+                    payload={"reason": message},
+                )
+            self.statusBar().showMessage(f"AI plan tidak dibuat: {message}")
             self._refresh_timeline_plan_status()
             return
 
@@ -2077,6 +2093,30 @@ class MiniCutMainWindow(QMainWindow):
             return "Timing audio narasi Prompt 3 tidak lagi tersedia."
         if not self._has_narration_a2(unit_id):
             return "Audio narasi A2 unit ini tidak lagi tersedia."
+        if not self._gemini_checkpoint_is_current(unit_id):
+            return "Verifikasi Gemini Prompt 3 sudah stale."
+
+        packet = self._evidence_checkpoint_packet(unit_id)
+        verification = self._gemini_checkpoint_verification(unit_id)
+        plan_source = self.v42_1b2_plan
+        if packet is None or verification is None or plan_source is None:
+            return "Evidence/Gemini/1B2 Prompt 3 tidak lagi tersedia."
+        try:
+            expected = build_verified_timeline_plan(
+                plan=plan_source,
+                packet=packet,
+                verification=verification,
+                document=self.document,
+                expected_revision=self.tools.revision,
+                narration_target_duration_ms=timing.duration_ms,
+            )
+        except V42PlanBuildError as exc:
+            return f"Prompt 3 tidak lagi dapat dibangun: {exc}"
+        if expected.get("actions") != plan.actions:
+            return (
+                "Action Prompt 3 tidak lagi identik dengan plan deterministik "
+                "dari evidence, Gemini, dan A2 terbaru."
+            )
 
         visual_actions = [
             action
