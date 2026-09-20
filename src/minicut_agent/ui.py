@@ -87,6 +87,7 @@ class MiniCutMainWindow(QMainWindow):
         self.player.setAudioOutput(self.audio_output)
 
         self._build_actions()
+        self._build_menus()
         self._build_toolbar()
         self._build_workspace()
         self._build_ai_dock()
@@ -140,6 +141,23 @@ class MiniCutMainWindow(QMainWindow):
 
         self.action_export = QAction("Export", self)
         self.action_export.setEnabled(False)
+
+    def _build_menus(self):
+        file_menu = self.menuBar().addMenu("File")
+        file_menu.addAction(self.action_open_project)
+        file_menu.addAction(self.action_import)
+        file_menu.addSeparator()
+        file_menu.addAction(self.action_save_project)
+        file_menu.addAction(self.action_save_project_as)
+        file_menu.addSeparator()
+        file_menu.addAction(self.action_export)
+
+        edit_menu = self.menuBar().addMenu("Edit")
+        edit_menu.addAction(self.action_undo)
+        edit_menu.addAction(self.action_redo)
+        edit_menu.addSeparator()
+        edit_menu.addAction(self.action_split)
+        edit_menu.addAction(self.action_delete)
 
     def _build_toolbar(self):
         bar = QToolBar("Main", self)
