@@ -36,7 +36,7 @@ class OneB2ParserTests(unittest.TestCase):
 **Urutan pengerjaan:** J-001 → N-001 → N-002 → Audit B-001
 **Wilayah kandidat tambahan yang belum eksklusif:** 00:10:00.000 - 00:10:08.000
 **Kepemilikan visual:**
-- N-001: kandidat 00:09:40.000–00:09:48.500
+- N-001 → kandidat 00:09:40.000–00:09:48.500
 - J-001: inti 00:10:02.000–00:10:05.000
 
 1. J-001
@@ -90,6 +90,11 @@ class OneB2ParserTests(unittest.TestCase):
         self.assertEqual(len(plan.units["J-001"].candidate_ranges), 2)
         self.assertEqual(len(plan.units["N-001"].candidate_ranges), 1)
         self.assertEqual(plan.units["N-001"].block_id, "B-001")
+        self.assertEqual(plan.blocks["B-001"].work_order, ["J-001", "N-001"])
+        self.assertEqual(
+            plan.units["N-001"].fields["Kolam visual per lokasi narasi"]["Kantor"][0],
+            "00:00:20.000 - 00:00:28.000",
+        )
 
     def test_load_json_sets_digest_and_round_trips(self):
         raw = [
