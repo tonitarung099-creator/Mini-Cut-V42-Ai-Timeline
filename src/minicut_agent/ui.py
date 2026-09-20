@@ -2111,6 +2111,9 @@ class MiniCutMainWindow(QMainWindow):
                 autoplay=self._timeline_playing,
                 force_seek=True,
             )
+        if self.v42_1b2_plan is not None:
+            self._record_region_layout()
+            self._refresh_region_status()
         self._autosave_project()
         if message:
             self.statusBar().showMessage(message)
@@ -2125,6 +2128,8 @@ class MiniCutMainWindow(QMainWindow):
             self._refresh_ai_plan()
         if hasattr(self, "ai_timeline_plan_status"):
             self._refresh_timeline_plan_status()
+        if hasattr(self, "ai_region_status"):
+            self._refresh_region_status()
 
     @staticmethod
     def _tool_error_message(result: dict) -> str:
