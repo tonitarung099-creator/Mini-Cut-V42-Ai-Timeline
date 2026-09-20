@@ -43,11 +43,7 @@ class BridgeRouter:
         state = self.registry.state()
         extra = dict(self.state_provider() or {})
         state.update(extra)
-        state["bridge_tools"] = [
-            *self.registry.tool_names,
-            "batch",
-            "seek",
-        ]
+        state["bridge_tools"] = ["get_state", "seek"]
         if self.plan_manager is not None:
             state["bridge_tools"].extend(
                 ["propose_plan", "get_pending_plan", "cancel_plan"]
@@ -123,6 +119,13 @@ class BridgeRouter:
                 self._notify_plan()
             return result
 
+        if tool in set(self.registry.mutation_tool_names) | {"undo", "redo"}:
+            return self._error(
+                tool,
+                "review_required",
+                "AI eksternal harus mengajukan propose_plan; perubahan timeline diterapkan dari UI setelah review.",
+            )
+
         source_error = self._validate_insert_source(tool, args)
         if source_error is not None:
             return source_error
@@ -133,25 +136,11 @@ class BridgeRouter:
         return result
 
     def batch(self, payload: dict[str, Any]) -> dict[str, Any]:
-        actions = payload.get("actions")
-        if not isinstance(actions, list):
-            return self._error("batch", "validation_error", "actions harus berupa array.")
-
-        for action in actions:
-            if not isinstance(action, dict):
-                return self._error("batch", "validation_error", "Setiap action harus berupa object.")
-            tool = str(action.get("tool", ""))
-            args = dict(action.get("args") or {})
-            source_error = self._validate_insert_source(tool, args)
-            if source_error is not None:
-                source_error["tool"] = "batch"
-                return source_error
-
-        expected = payload.get("expected_revision")
-        result = self.registry.execute_batch(actions, expected_revision=expected)
-        if result.get("ok"):
-            self._notify_mutation()
-        return result
+        return self._error(
+            "batch",
+            "review_required",
+            "AI eksternal harus mengajukan propose_plan; batch langsung dinonaktifkan.",
+        )
 
     def _validate_insert_source(
         self, tool: str, args: dict[str, Any]
