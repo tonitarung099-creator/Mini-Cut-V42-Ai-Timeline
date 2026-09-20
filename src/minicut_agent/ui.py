@@ -5,7 +5,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from PySide6.QtCore import Qt, QTimer, QUrl
-from PySide6.QtGui import QAction
+from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
@@ -13,7 +13,6 @@ from PySide6.QtWidgets import (
     QDockWidget,
     QFileDialog,
     QFormLayout,
-    QFrame,
     QHBoxLayout,
     QLabel,
     QListWidget,
@@ -21,6 +20,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QPlainTextEdit,
     QPushButton,
+    QSizePolicy,
     QSlider,
     QSplitter,
     QToolBar,
@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .timeline_history import TimelineHistory
 from .timeline_model import TimelineDocument
 from .timeline_view import TimelineView
 
@@ -60,6 +61,7 @@ class MiniCutMainWindow(QMainWindow):
         self.setAcceptDrops(True)
 
         self.document = TimelineDocument.default()
+        self.history = TimelineHistory(self.document)
         self.media_durations: dict[str, int] = {}
         self.current_media: str | None = None
 
@@ -72,12 +74,14 @@ class MiniCutMainWindow(QMainWindow):
         self._build_workspace()
         self._build_ai_dock()
         self._connect_player()
+        self._refresh_edit_actions()
 
-        self.statusBar().showMessage("Siap · UI Filmora shell")
+        self.statusBar().showMessage("Siap · timeline manual aktif")
         self.setStyleSheet(STYLE)
 
     def _build_actions(self):
         self.action_import = QAction("Import", self)
+        self.action_import.setShortcut(QKeySequence.StandardKey.Open)
         self.action_import.triggered.connect(self.import_media)
 
         self.action_add_timeline = QAction("Add to Timeline", self)
@@ -85,16 +89,20 @@ class MiniCutMainWindow(QMainWindow):
         self.action_add_timeline.triggered.connect(self.add_selected_to_timeline)
 
         self.action_split = QAction("Split", self)
-        self.action_split.setEnabled(False)
+        self.action_split.setShortcut(QKeySequence("Ctrl+B"))
+        self.action_split.triggered.connect(self.split_selected_clip)
 
         self.action_delete = QAction("Delete", self)
-        self.action_delete.setEnabled(False)
+        self.action_delete.setShortcut(QKeySequence.StandardKey.Delete)
+        self.action_delete.triggered.connect(self.delete_selected_clip)
 
         self.action_undo = QAction("Undo", self)
-        self.action_undo.setEnabled(False)
+        self.action_undo.setShortcut(QKeySequence.StandardKey.Undo)
+        self.action_undo.triggered.connect(self.undo_timeline)
 
         self.action_redo = QAction("Redo", self)
-        self.action_redo.setEnabled(False)
+        self.action_redo.setShortcut(QKeySequence.StandardKey.Redo)
+        self.action_redo.triggered.connect(self.redo_timeline)
 
         self.action_export = QAction("Export", self)
         self.action_export.setEnabled(False)
@@ -114,7 +122,7 @@ class MiniCutMainWindow(QMainWindow):
             bar.addAction(action)
         bar.addSeparator()
         spacer = QWidget()
-        spacer.setSizePolicy(spacer.sizePolicy().Policy.Expanding, spacer.sizePolicy().Policy.Preferred)
+        spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         bar.addWidget(spacer)
         bar.addAction(self.action_export)
 
@@ -170,7 +178,13 @@ class MiniCutMainWindow(QMainWindow):
         self.inspector_in = QLabel("—")
         self.inspector_out = QLabel("—")
         self.inspector_speed = QLabel("—")
-        for label in (self.inspector_source, self.inspector_track, self.inspector_in, self.inspector_out, self.inspector_speed):
+        for label in (
+            self.inspector_source,
+            self.inspector_track,
+            self.inspector_in,
+            self.inspector_out,
+            self.inspector_speed,
+        ):
             label.setObjectName("InspectorValue")
         self.inspector_form.addRow("Source", self.inspector_source)
         self.inspector_form.addRow("Track", self.inspector_track)
@@ -215,6 +229,7 @@ class MiniCutMainWindow(QMainWindow):
         self.timeline_zoom.valueChanged.connect(self.timeline.set_zoom)
         self.timeline.seekRequested.connect(self._timeline_seek)
         self.timeline.clipSelected.connect(self._clip_selected)
+        self.timeline.clipMoveRequested.connect(self._move_clip_requested)
 
     def _build_ai_dock(self):
         dock = QDockWidget("AI Agent", self)
@@ -225,7 +240,9 @@ class MiniCutMainWindow(QMainWindow):
         self.ai_status.setObjectName("StatusPill")
         self.ai_unit = QLabel("Unit V42: —")
         self.ai_input = QPlainTextEdit()
-        self.ai_input.setPlaceholderText("Nanti kamu bisa menulis: “Kerjakan B-001”, “Cari visual lain untuk N-007”, dll.")
+        self.ai_input.setPlaceholderText(
+            "Nanti kamu bisa menulis: “Kerjakan B-001”, “Cari visual lain untuk N-007”, dll."
+        )
         self.ai_input.setMaximumHeight(110)
         self.ai_run = QPushButton("Jalankan AI")
         self.ai_run.setEnabled(False)
@@ -249,7 +266,10 @@ class MiniCutMainWindow(QMainWindow):
             "Video (*.mp4 *.mkv *.mov *.avi *.webm *.m4v);;All Files (*)",
         )
         for filename in files:
-            if any(self.media_list.item(i).data(Qt.ItemDataRole.UserRole) == filename for i in range(self.media_list.count())):
+            if any(
+                self.media_list.item(i).data(Qt.ItemDataRole.UserRole) == filename
+                for i in range(self.media_list.count())
+            ):
                 continue
             item = QListWidgetItem(Path(filename).name)
             item.setToolTip(filename)
@@ -276,9 +296,12 @@ class MiniCutMainWindow(QMainWindow):
         path = str(items[0].data(Qt.ItemDataRole.UserRole))
         duration = int(self.media_durations.get(path, 0))
         if duration <= 0:
-            self.statusBar().showMessage("Durasi media belum siap. Tunggu preview selesai membaca file.")
+            self.statusBar().showMessage(
+                "Durasi media belum siap. Tunggu preview selesai membaca file."
+            )
             return
 
+        self.history.checkpoint()
         group_id = "media-" + uuid4().hex[:10]
         start = self.document.next_free_time("V1")
         self.document.insert_clip(
@@ -299,10 +322,90 @@ class MiniCutMainWindow(QMainWindow):
             group_id=group_id,
             label=Path(path).name + " · audio",
         )
+        self._timeline_changed(f"Ditambahkan ke timeline: {Path(path).name}")
+
+    def split_selected_clip(self):
+        clip_id = self.timeline.selected_clip_id
+        if not clip_id:
+            return
+        try:
+            self.history.checkpoint()
+            self.document.split_linked_at(clip_id, self.timeline.playhead_ms)
+        except (ValueError, KeyError) as exc:
+            # Discard no-op checkpoint by undoing it without exposing it to the user.
+            self.history.undo()
+            self.history._redo.clear()
+            self.statusBar().showMessage(str(exc))
+            self._refresh_edit_actions()
+            return
+        self.timeline.clear_selection()
+        self._clear_inspector()
+        self._timeline_changed("Split berhasil pada playhead.")
+
+    def delete_selected_clip(self):
+        clip_id = self.timeline.selected_clip_id
+        if not clip_id:
+            return
+        try:
+            self.history.checkpoint()
+            removed = self.document.remove_linked(clip_id)
+        except (ValueError, KeyError) as exc:
+            self.history.undo()
+            self.history._redo.clear()
+            self.statusBar().showMessage(str(exc))
+            self._refresh_edit_actions()
+            return
+        self.timeline.clear_selection()
+        self._clear_inspector()
+        self._timeline_changed(f"{len(removed)} linked clip dihapus.")
+
+    def _move_clip_requested(self, clip_id: str, track_id: str, timeline_start_ms: int):
+        try:
+            self.history.checkpoint()
+            self.document.move_linked(
+                clip_id,
+                track_id=track_id,
+                timeline_start_ms=timeline_start_ms,
+            )
+        except (ValueError, KeyError) as exc:
+            self.history.undo()
+            self.history._redo.clear()
+            self.statusBar().showMessage(str(exc))
+            self._refresh_edit_actions()
+            return
+        self._clip_selected(clip_id)
+        self._timeline_changed("Clip digeser.")
+
+    def undo_timeline(self):
+        if self.history.undo():
+            self.timeline.clear_selection()
+            self._clear_inspector()
+            self._timeline_changed("Undo.")
+        else:
+            self._refresh_edit_actions()
+
+    def redo_timeline(self):
+        if self.history.redo():
+            self.timeline.clear_selection()
+            self._clear_inspector()
+            self._timeline_changed("Redo.")
+        else:
+            self._refresh_edit_actions()
+
+    def _timeline_changed(self, message: str = ""):
         self.timeline.update()
         self.timeline_status.setText(f"{len(self.document.clips)} clip")
-        self.action_export.setEnabled(True)
-        self.statusBar().showMessage(f"Ditambahkan ke timeline: {Path(path).name}")
+        self.action_export.setEnabled(bool(self.document.clips))
+        self._refresh_edit_actions()
+        if message:
+            self.statusBar().showMessage(message)
+
+    def _refresh_edit_actions(self):
+        selected = bool(getattr(self, "timeline", None) and self.timeline.selected_clip_id)
+        self.action_split.setEnabled(selected)
+        self.action_delete.setEnabled(selected)
+        self.action_undo.setEnabled(self.history.can_undo)
+        self.action_redo.setEnabled(self.history.can_redo)
 
     def toggle_play(self):
         if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
@@ -320,7 +423,11 @@ class MiniCutMainWindow(QMainWindow):
         self._update_time_label(position, self.player.duration())
 
     def _playback_state_changed(self, state):
-        self.play_button.setText("⏸ Pause" if state == QMediaPlayer.PlaybackState.PlayingState else "▶ Play")
+        self.play_button.setText(
+            "⏸ Pause"
+            if state == QMediaPlayer.PlaybackState.PlayingState
+            else "▶ Play"
+        )
 
     def _timeline_seek(self, milliseconds: int):
         if self.current_media:
@@ -333,8 +440,17 @@ class MiniCutMainWindow(QMainWindow):
         self.inspector_in.setText(self._clock(clip.source_in_ms))
         self.inspector_out.setText(self._clock(clip.source_out_ms))
         self.inspector_speed.setText(f"{clip.speed:.2f}×")
-        self.action_delete.setEnabled(True)
-        self.action_split.setEnabled(True)
+        self._refresh_edit_actions()
+
+    def _clear_inspector(self):
+        for label in (
+            self.inspector_source,
+            self.inspector_track,
+            self.inspector_in,
+            self.inspector_out,
+            self.inspector_speed,
+        ):
+            label.setText("—")
 
     def _update_time_label(self, position: int, duration: int):
         self.time_label.setText(f"{self._clock(position)} / {self._clock(duration)}")
@@ -366,6 +482,7 @@ class MiniCutMainWindow(QMainWindow):
         assert self.media_list is not None
         assert self.video is not None
         assert self.findChild(QDockWidget, "AIAgentDock") is not None
+        assert self.history.document is self.document
         self.statusBar().showMessage("SELF TEST PASS")
 
 
