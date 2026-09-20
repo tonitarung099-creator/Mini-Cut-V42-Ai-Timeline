@@ -259,7 +259,17 @@ def parse_registration_json(raw: Any) -> V42OneB2Plan:
             or normalized.get("wilayah kandidat")
             or normalized.get("candidate ranges")
         )
-        for candidate in extract_candidate_ranges(candidate_value):
+        for candidate in extract_candidate_ranges(
+            candidate_value,
+            label="Wilayah kandidat visual",
+        ):
+            _append_range_unique(unit.candidate_ranges, candidate)
+
+        location_pools = normalized.get("kolam visual per lokasi narasi")
+        for candidate in extract_candidate_ranges(
+            location_pools,
+            label="Kolam visual per lokasi narasi",
+        ):
             _append_range_unique(unit.candidate_ranges, candidate)
 
     ordered = sorted(
@@ -619,6 +629,30 @@ def _finalize_plan(plan: V42OneB2Plan) -> None:
             _append_unique(block.unit_ids, unit_id)
             if unit.work_order is None:
                 unit.work_order = plan.work_queue.index(item) + 1 if item in plan.work_queue else None
+
+    # Synthesize per-block orders when the registration JSON supplied numeric
+    # order fields rather than arrow-separated block fields.
+    for block in plan.blocks.values():
+        if not block.display_order:
+            ordered_display = sorted(
+                (
+                    (unit.display_order, unit.id)
+                    for unit in plan.units.values()
+                    if unit.block_id == block.id and unit.display_order is not None
+                ),
+                key=lambda item: (item[0], item[1]),
+            )
+            block.display_order = [unit_id for _, unit_id in ordered_display]
+        if not block.work_order:
+            ordered_work = sorted(
+                (
+                    (unit.work_order, unit.id)
+                    for unit in plan.units.values()
+                    if unit.block_id == block.id and unit.work_order is not None
+                ),
+                key=lambda item: (item[0], item[1]),
+            )
+            block.work_order = [unit_id for _, unit_id in ordered_work]
 
     # Add block membership for units mentioned only in the global work queue when
     # there is exactly one plausible block.
