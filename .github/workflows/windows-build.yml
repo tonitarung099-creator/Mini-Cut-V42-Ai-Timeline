@@ -5,6 +5,8 @@ on:
   pull_request:
     paths:
       - 'src/**'
+      - 'scripts/**'
+      - 'baseline/**'
       - 'requirements.txt'
       - '.github/workflows/windows-build.yml'
 
@@ -16,6 +18,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+      - name: Restore editable baseline source
+        run: python scripts/unpack_baseline_source.py --force
       - name: Install dependencies
         shell: pwsh
         run: |
