@@ -51,6 +51,14 @@ from .timeline_model import TimelineDocument
 from .timeline_tools import TimelineToolRegistry
 from .timeline_view import TimelineView
 from .v42_1b2 import V42OneB2Plan, load_1b2
+from .v42_narration import (
+    NarrationMappingError,
+    NarrationScript,
+    NarrationTimingSet,
+    build_narration_audio_plan,
+    build_narration_timings,
+    load_narration_script,
+)
 from .v42_regions import V42RegionLayout, compute_region_layout
 from .v42_state import V42WorkflowState
 from .v42_verified_plan import V42PlanBuildError, build_verified_timeline_plan
@@ -163,6 +171,38 @@ class GeminiVerificationWorker(QThread):
         self.resultReady.emit(result)
 
 
+class NarrationTimingWorker(QThread):
+    resultReady = Signal(object)
+    errorRaised = Signal(str)
+
+    def __init__(
+        self,
+        script: NarrationScript,
+        plan: V42OneB2Plan,
+        narration_srt_path: str,
+        audio_path: str,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.script = script
+        self.plan = plan
+        self.narration_srt_path = narration_srt_path
+        self.audio_path = audio_path
+
+    def run(self):
+        try:
+            result = build_narration_timings(
+                script=self.script,
+                plan=self.plan,
+                narration_srt_path=self.narration_srt_path,
+                audio_path=self.audio_path,
+            )
+        except Exception as exc:
+            self.errorRaised.emit(str(exc))
+            return
+        self.resultReady.emit(result)
+
+
 class MiniCutMainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -183,6 +223,10 @@ class MiniCutMainWindow(QMainWindow):
         self.workflow_state = V42WorkflowState()
         self.v42_1b2_plan: V42OneB2Plan | None = None
         self.film_srt_path: Path | None = None
+        self.narration_script: NarrationScript | None = None
+        self.narration_audio_path: Path | None = None
+        self.narration_srt_path: Path | None = None
+        self.narration_timing_set: NarrationTimingSet | None = None
         self._gemini_key_load_error = ""
         try:
             self.gemini_key_pool = load_key_store()
@@ -192,6 +236,7 @@ class MiniCutMainWindow(QMainWindow):
         self._shot_worker: ShotDetectionWorker | None = None
         self._evidence_worker: EvidencePacketWorker | None = None
         self._gemini_worker: GeminiVerificationWorker | None = None
+        self._narration_worker: NarrationTimingWorker | None = None
         self._loading_project = False
 
         # Preview has two contexts: source-bin preview and composed timeline preview.
@@ -428,6 +473,22 @@ class MiniCutMainWindow(QMainWindow):
         self.ai_region_status.setObjectName("StatusPill")
         self.ai_import_1b2 = QPushButton("Import 1B2")
         self.ai_import_1b2.clicked.connect(self.import_1b2_plan)
+
+        self.ai_narration_status = QLabel("Prompt 3 audio: belum siap")
+        self.ai_narration_status.setObjectName("StatusPill")
+        self.ai_import_1b1 = QPushButton("Import Prompt 1B1 Final")
+        self.ai_import_1b1.clicked.connect(self.import_prompt1b1)
+        self.ai_import_narration_audio = QPushButton("Import Audio Narasi")
+        self.ai_import_narration_audio.clicked.connect(self.import_narration_audio)
+        self.ai_import_narration_srt = QPushButton("Import SRT Narasi")
+        self.ai_import_narration_srt.clicked.connect(self.import_narration_srt)
+        self.ai_analyze_narration = QPushButton("Analisis Waveform Narasi")
+        self.ai_analyze_narration.setEnabled(False)
+        self.ai_analyze_narration.clicked.connect(self.analyze_narration_audio)
+        self.ai_plan_narration_audio = QPushButton("Buat Plan Audio N di A2")
+        self.ai_plan_narration_audio.setEnabled(False)
+        self.ai_plan_narration_audio.clicked.connect(self._build_narration_audio_plan)
+
         self.ai_shot_status = QLabel("Shot lokal: belum dianalisis")
         self.ai_shot_status.setObjectName("StatusPill")
         self.ai_detect_shots = QPushButton("Pecah Kandidat per Kamera")
@@ -492,6 +553,12 @@ class MiniCutMainWindow(QMainWindow):
         layout.addWidget(self.ai_1b2_status)
         layout.addWidget(self.ai_region_status)
         layout.addWidget(self.ai_import_1b2)
+        layout.addWidget(self.ai_narration_status)
+        layout.addWidget(self.ai_import_1b1)
+        layout.addWidget(self.ai_import_narration_audio)
+        layout.addWidget(self.ai_import_narration_srt)
+        layout.addWidget(self.ai_analyze_narration)
+        layout.addWidget(self.ai_plan_narration_audio)
         layout.addWidget(self.ai_shot_status)
         layout.addWidget(self.ai_detect_shots)
         layout.addWidget(self.ai_srt_status)
@@ -515,6 +582,7 @@ class MiniCutMainWindow(QMainWindow):
         self._refresh_gemini_verify_status()
         self._refresh_timeline_plan_status()
         self._refresh_region_status()
+        self._refresh_narration_status()
         self._refresh_ai_plan()
 
     def import_1b2_plan(self):
@@ -662,7 +730,16 @@ class MiniCutMainWindow(QMainWindow):
         plan = self.v42_1b2_plan
         if plan is None:
             return None
-        return compute_region_layout(plan, self.document)
+        duration_overrides = (
+            {}
+            if self.narration_timing_set is None
+            else self.narration_timing_set.duration_overrides()
+        )
+        return compute_region_layout(
+            plan,
+            self.document,
+            duration_overrides=duration_overrides,
+        )
 
     def _record_region_layout(self):
         layout = self._current_region_layout()
@@ -711,6 +788,330 @@ class MiniCutMainWindow(QMainWindow):
             f"{region.start_ms / 1000:.2f}s–{region.end_ms / 1000:.2f}s · "
             f"{state}/{region.duration_source}"
         )
+
+    def import_prompt1b1(self):
+        filename, _ = QFileDialog.getOpenFileName(
+            self,
+            "Import Prompt 1B1 Final",
+            "",
+            "Prompt 1B1 (*.docx *.txt);;Word (*.docx);;Text (*.txt);;All Files (*)",
+        )
+        if not filename:
+            return
+        try:
+            script = load_narration_script(filename)
+        except (OSError, ValueError, TypeError, NarrationMappingError) as exc:
+            self.statusBar().showMessage(f"Gagal membaca Prompt 1B1: {exc}")
+            return
+
+        self.narration_script = script
+        self.narration_timing_set = None
+        self.record_v42_checkpoint(
+            "prompt1b1-narration",
+            payload={"script": script.to_dict()},
+        )
+        self._refresh_narration_status()
+        self._refresh_region_status()
+        self.statusBar().showMessage(
+            f"Prompt 1B1 dimuat · {len(script.units)} unit narasi final."
+        )
+
+    def import_narration_audio(self):
+        filename, _ = QFileDialog.getOpenFileName(
+            self,
+            "Import Audio Narasi Final",
+            "",
+            "Audio (*.wav *.mp3 *.m4a *.aac *.flac *.ogg *.opus);;All Files (*)",
+        )
+        if not filename:
+            return
+        self.narration_audio_path = Path(filename)
+        self.narration_timing_set = None
+        self._ensure_media_source(filename)
+        self.record_v42_checkpoint(
+            "narration-assets",
+            payload={
+                "audio_path": str(self.narration_audio_path),
+                "srt_path": (
+                    None
+                    if self.narration_srt_path is None
+                    else str(self.narration_srt_path)
+                ),
+            },
+        )
+        self._refresh_narration_status()
+        self.statusBar().showMessage(
+            f"Audio narasi dimuat: {self.narration_audio_path.name}"
+        )
+
+    def import_narration_srt(self):
+        filename, _ = QFileDialog.getOpenFileName(
+            self,
+            "Import SRT Narasi",
+            "",
+            "SubRip Subtitle (*.srt);;All Files (*)",
+        )
+        if not filename:
+            return
+        try:
+            cues, _ = load_srt(filename)
+        except (OSError, ValueError, TypeError) as exc:
+            self.statusBar().showMessage(f"Gagal membaca SRT narasi: {exc}")
+            return
+        if not cues:
+            self.statusBar().showMessage("SRT narasi tidak memiliki cue valid.")
+            return
+
+        self.narration_srt_path = Path(filename)
+        self.narration_timing_set = None
+        self.record_v42_checkpoint(
+            "narration-assets",
+            payload={
+                "audio_path": (
+                    None
+                    if self.narration_audio_path is None
+                    else str(self.narration_audio_path)
+                ),
+                "srt_path": str(self.narration_srt_path),
+            },
+        )
+        self._refresh_narration_status()
+        self.statusBar().showMessage(
+            f"SRT narasi dimuat · {len(cues)} cue · {self.narration_srt_path.name}"
+        )
+
+    def analyze_narration_audio(self):
+        if self._narration_worker is not None:
+            self.statusBar().showMessage("Analisis audio narasi masih berjalan.")
+            return
+        if self.v42_1b2_plan is None:
+            self.statusBar().showMessage("Import 1B2 terlebih dahulu.")
+            return
+        if self.narration_script is None:
+            self.statusBar().showMessage("Import Prompt 1B1 Final terlebih dahulu.")
+            return
+        if self.narration_audio_path is None or not self.narration_audio_path.is_file():
+            self.statusBar().showMessage("Import Audio Narasi Final terlebih dahulu.")
+            return
+        if self.narration_srt_path is None or not self.narration_srt_path.is_file():
+            self.statusBar().showMessage("Import SRT Narasi terlebih dahulu.")
+            return
+
+        worker = NarrationTimingWorker(
+            self.narration_script,
+            self.v42_1b2_plan,
+            str(self.narration_srt_path),
+            str(self.narration_audio_path),
+            parent=self,
+        )
+        worker.resultReady.connect(self._narration_timing_ready)
+        worker.errorRaised.connect(self._narration_timing_error)
+        worker.finished.connect(self._narration_timing_finished)
+        self._narration_worker = worker
+
+        self.ai_analyze_narration.setEnabled(False)
+        self.ai_narration_status.setText("Prompt 3 audio: analisis waveform…")
+        self.statusBar().showMessage(
+            "Mencocokkan N-xxx ke SRT narasi dan mencari safe padding waveform…"
+        )
+        worker.start()
+
+    def _narration_timing_ready(self, result: NarrationTimingSet):
+        self.narration_timing_set = result
+        self.record_v42_checkpoint(
+            "narration-timings",
+            payload={
+                "timing_set": result.to_dict(),
+                "summary": {
+                    "units": len(result.timings),
+                    "warnings": len(result.warnings),
+                },
+            },
+        )
+        self._record_region_layout()
+        self._refresh_narration_status()
+        self._refresh_region_status()
+        self._refresh_timeline_plan_status()
+        self.statusBar().showMessage(
+            f"Timing narasi siap · {len(result.timings)} unit N · "
+            f"{len(result.warnings)} peringatan."
+        )
+
+    def _narration_timing_error(self, message: str):
+        self.ai_narration_status.setText("Prompt 3 audio: gagal")
+        self.statusBar().showMessage(f"Analisis narasi gagal: {message}")
+
+    def _narration_timing_finished(self):
+        worker = self._narration_worker
+        self._narration_worker = None
+        if worker is not None:
+            worker.deleteLater()
+        self._refresh_narration_status()
+
+    def _restore_narration_from_workflow(self):
+        self.narration_script = None
+        self.narration_audio_path = None
+        self.narration_srt_path = None
+        self.narration_timing_set = None
+
+        script_cp = self.workflow_state.checkpoints.get("prompt1b1-narration")
+        if isinstance(script_cp, dict):
+            payload = script_cp.get("payload")
+            raw = payload.get("script") if isinstance(payload, dict) else None
+            if isinstance(raw, dict):
+                try:
+                    self.narration_script = NarrationScript.from_dict(raw)
+                except (KeyError, TypeError, ValueError):
+                    self.narration_script = None
+
+        assets_cp = self.workflow_state.checkpoints.get("narration-assets")
+        if isinstance(assets_cp, dict):
+            payload = assets_cp.get("payload")
+            if isinstance(payload, dict):
+                if payload.get("audio_path"):
+                    self.narration_audio_path = Path(str(payload["audio_path"]))
+                if payload.get("srt_path"):
+                    self.narration_srt_path = Path(str(payload["srt_path"]))
+
+        timing_cp = self.workflow_state.checkpoints.get("narration-timings")
+        if isinstance(timing_cp, dict):
+            payload = timing_cp.get("payload")
+            raw = payload.get("timing_set") if isinstance(payload, dict) else None
+            if isinstance(raw, dict):
+                try:
+                    self.narration_timing_set = NarrationTimingSet.from_dict(raw)
+                except (KeyError, TypeError, ValueError):
+                    self.narration_timing_set = None
+
+        self._refresh_narration_status()
+
+    def _narration_timing(self, unit_id: str | None):
+        if (
+            unit_id is None
+            or self.narration_timing_set is None
+        ):
+            return None
+        return self.narration_timing_set.timings.get(str(unit_id).upper())
+
+    def _build_narration_audio_plan(self):
+        if self.plan_manager.pending is not None:
+            self.statusBar().showMessage(
+                "Masih ada AI plan yang menunggu Apply atau Cancel."
+            )
+            return
+
+        plan = self.v42_1b2_plan
+        unit_id = self._shot_unit_id()
+        if plan is None or unit_id is None:
+            self.statusBar().showMessage("Belum ada unit V42 aktif.")
+            return
+        unit = plan.units.get(unit_id)
+        if unit is None or unit.kind != "narration":
+            self.statusBar().showMessage(
+                f"{unit_id} bukan unit narasi; A2 hanya untuk N-xxx."
+            )
+            return
+        if self.narration_timing_set is None:
+            self.statusBar().showMessage("Analisis waveform narasi terlebih dahulu.")
+            return
+
+        try:
+            payload = build_narration_audio_plan(
+                plan=plan,
+                timing_set=self.narration_timing_set,
+                document=self.document,
+                unit_id=unit_id,
+                expected_revision=self.tools.revision,
+            )
+        except NarrationMappingError as exc:
+            self.statusBar().showMessage(f"Plan audio N tidak dibuat: {exc}")
+            return
+
+        result = self.plan_manager.propose(payload)
+        if not result.get("ok"):
+            self.statusBar().showMessage(
+                str(result.get("error", {}).get("message", "Gagal membuat plan audio N."))
+            )
+            return
+        self._refresh_ai_plan()
+        self._refresh_narration_status()
+        self.statusBar().showMessage(
+            f"Plan audio {unit_id} siap direview · A2 belum berubah."
+        )
+
+    def _refresh_narration_status(self):
+        if not hasattr(self, "ai_narration_status"):
+            return
+        plan = self.v42_1b2_plan
+        unit_id = self._shot_unit_id()
+        ready_inputs = (
+            plan is not None
+            and self.narration_script is not None
+            and self.narration_audio_path is not None
+            and self.narration_audio_path.is_file()
+            and self.narration_srt_path is not None
+            and self.narration_srt_path.is_file()
+        )
+        self.ai_analyze_narration.setEnabled(
+            bool(ready_inputs) and self._narration_worker is None
+        )
+
+        timing = self._narration_timing(unit_id)
+        is_n = bool(
+            plan is not None
+            and unit_id is not None
+            and unit_id in plan.units
+            and plan.units[unit_id].kind == "narration"
+        )
+        has_a2 = bool(
+            unit_id
+            and any(
+                clip.unit_id == unit_id
+                and clip.track_id == "A2"
+                and clip.origin == "narration_audio"
+                for clip in self.document.clips
+            )
+        )
+        self.ai_plan_narration_audio.setEnabled(
+            is_n
+            and timing is not None
+            and not has_a2
+            and self.plan_manager.pending is None
+        )
+
+        if self._narration_worker is not None:
+            self.ai_narration_status.setText("Prompt 3 audio: analisis waveform…")
+        elif timing is not None:
+            state = "A2 terpasang" if has_a2 else "siap plan A2"
+            self.ai_narration_status.setText(
+                f"Audio {unit_id}: {timing.duration_ms / 1000:.2f}s · "
+                f"pad -{timing.pre_padding_ms}/+{timing.post_padding_ms} ms · {state}"
+            )
+        elif ready_inputs:
+            self.ai_narration_status.setText(
+                "Prompt 3 audio: input lengkap · belum dianalisis"
+            )
+        else:
+            missing = []
+            if self.narration_script is None:
+                missing.append("1B1")
+            if self.narration_audio_path is None or not self.narration_audio_path.is_file():
+                missing.append("audio")
+            if self.narration_srt_path is None or not self.narration_srt_path.is_file():
+                missing.append("SRT")
+            self.ai_narration_status.setText(
+                "Prompt 3 audio: butuh " + "/".join(missing or ["1B2"])
+            )
+
+    def _ensure_media_source(self, source: str):
+        source = str(source)
+        for index in range(self.media_list.count()):
+            if str(self.media_list.item(index).data(Qt.ItemDataRole.UserRole)) == source:
+                return
+        item = QListWidgetItem(Path(source).name)
+        item.setToolTip(source)
+        item.setData(Qt.ItemDataRole.UserRole, source)
+        self.media_list.addItem(item)
 
     def _analysis_source_path(self) -> str | None:
         selected = self.media_list.selectedItems()
@@ -1448,7 +1849,32 @@ class MiniCutMainWindow(QMainWindow):
         if not source or source not in self._allowed_bridge_sources():
             return "AI hanya boleh memasukkan media yang sudah di-import ke proyek."
 
-        if str(args.get("origin", "")) != "gemini_verified":
+        origin = str(args.get("origin", ""))
+        if origin == "narration_audio":
+            unit_id = str(args.get("unit_id", "")).strip().upper()
+            if self.v42_1b2_plan is None or unit_id not in self.v42_1b2_plan.units:
+                return "Audio narasi tidak memiliki unit V42 yang valid."
+            unit = self.v42_1b2_plan.units[unit_id]
+            if unit.kind != "narration" or str(args.get("track_id", "")) != "A2":
+                return "Audio narasi N hanya boleh ditempatkan di A2."
+            timing = self._narration_timing(unit_id)
+            if timing is None:
+                return "Timing waveform unit narasi tidak tersedia."
+            if source != str(self.narration_timing_set.audio_path):
+                return "Source audio tidak cocok dengan hasil analisis narasi."
+            try:
+                source_in = int(args["source_in_ms"])
+                source_out = int(args["source_out_ms"])
+            except (KeyError, TypeError, ValueError):
+                return "Timestamp audio narasi tidak valid."
+            if (
+                source_in != timing.source_in_ms
+                or source_out != timing.source_out_ms
+            ):
+                return "Rentang audio plan berbeda dari safe-padding waveform."
+            return None
+
+        if origin != "gemini_verified":
             return None
 
         unit_id = str(args.get("unit_id", "")).strip().upper()
@@ -1542,6 +1968,8 @@ class MiniCutMainWindow(QMainWindow):
             self._refresh_timeline_plan_status()
         if hasattr(self, "ai_region_status"):
             self._refresh_region_status()
+        if hasattr(self, "ai_narration_status"):
+            self._refresh_narration_status()
 
     def _apply_ai_plan(self):
         plan = self.plan_manager.pending
@@ -1818,6 +2246,7 @@ class MiniCutMainWindow(QMainWindow):
             self.workflow_state = workflow
             self._restore_1b2_plan_from_workflow()
             self._restore_srt_from_workflow()
+            self._restore_narration_from_workflow()
             self.project_path = Path(filename)
 
             self.media_list.clear()
@@ -1835,6 +2264,17 @@ class MiniCutMainWindow(QMainWindow):
                 str(self.media_list.item(i).data(Qt.ItemDataRole.UserRole))
                 for i in range(self.media_list.count())
             }
+            if (
+                self.narration_audio_path is not None
+                and str(self.narration_audio_path) not in known
+            ):
+                source = str(self.narration_audio_path)
+                known.add(source)
+                item = QListWidgetItem(Path(source).name)
+                item.setToolTip(source)
+                item.setData(Qt.ItemDataRole.UserRole, source)
+                self.media_list.addItem(item)
+
             for clip in self.document.clips:
                 if not clip.source or clip.source in known:
                     continue
@@ -2374,6 +2814,12 @@ class MiniCutMainWindow(QMainWindow):
         assert self.v42_1b2_plan is None
         assert self.ai_1b2_status is not None
         assert self.ai_region_status is not None
+        assert self.ai_narration_status is not None
+        assert self.ai_import_1b1 is not None
+        assert self.ai_import_narration_audio is not None
+        assert self.ai_import_narration_srt is not None
+        assert self.ai_analyze_narration is not None
+        assert self.ai_plan_narration_audio is not None
         assert self.ai_shot_status is not None
         assert self.ai_detect_shots is not None
         assert self.ai_srt_status is not None
