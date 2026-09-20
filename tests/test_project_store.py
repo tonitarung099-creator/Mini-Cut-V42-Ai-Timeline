@@ -26,6 +26,9 @@ class ProjectStoreTests(unittest.TestCase):
             speed=0.5,
             group_id="g1",
             label="Film",
+            unit_id="J-001",
+            block_id="B-001",
+            origin="gemini_verified",
         )
         doc.insert_clip(
             source="film.mp4",
@@ -36,6 +39,9 @@ class ProjectStoreTests(unittest.TestCase):
             speed=0.5,
             group_id="g1",
             label="Film audio",
+            unit_id="J-001",
+            block_id="B-001",
+            origin="gemini_verified",
         )
         return doc, video
 
@@ -84,6 +90,9 @@ class ProjectStoreTests(unittest.TestCase):
         self.assertEqual(len(target.clips), 2)
         self.assertFalse(target_history.can_undo)
         self.assertEqual(snapshot.workflow["active_unit"], "N-002")
+        self.assertEqual(target.clips[0].unit_id, "J-001")
+        self.assertEqual(target.clips[0].block_id, "B-001")
+        self.assertEqual(target.clips[0].origin, "gemini_verified")
 
     def test_invalid_clip_track_is_rejected(self):
         raw = {
