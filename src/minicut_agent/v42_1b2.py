@@ -612,9 +612,20 @@ def _append_unique(items: list[str], value: str) -> None:
 
 
 def _append_range_unique(items: list[CandidateRange], value: CandidateRange) -> None:
-    key = (value.start_ms, value.end_ms, value.location)
-    if all((item.start_ms, item.end_ms, item.location) != key for item in items):
-        items.append(value)
+    # The central registration may repeat the same temporal range once as the
+    # general candidate area and again inside a narration location pool. Treat
+    # it as one candidate while enriching it with the more specific metadata.
+    for item in items:
+        if item.start_ms != value.start_ms or item.end_ms != value.end_ms:
+            continue
+        if not item.location and value.location:
+            item.location = value.location
+        if not item.label and value.label:
+            item.label = value.label
+        if not item.source_text and value.source_text:
+            item.source_text = value.source_text
+        return
+    items.append(value)
 
 
 def _finalize_plan(plan: V42OneB2Plan) -> None:
