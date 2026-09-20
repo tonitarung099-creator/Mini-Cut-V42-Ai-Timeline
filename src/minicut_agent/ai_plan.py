@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 from uuid import uuid4
 
 from .timeline_tools import TimelineToolRegistry
@@ -37,8 +37,14 @@ class TimelinePlan:
 class TimelinePlanManager:
     """Holds one reviewable AI edit plan without mutating the timeline."""
 
-    def __init__(self, registry: TimelineToolRegistry):
+    def __init__(
+        self,
+        registry: TimelineToolRegistry,
+        *,
+        action_validator: Callable[[str, dict[str, Any]], str | None] | None = None,
+    ):
         self.registry = registry
+        self.action_validator = action_validator
         self.pending: TimelinePlan | None = None
 
     def propose(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -145,6 +151,10 @@ class TimelinePlanManager:
                 raise ValueError(
                     "expected_revision hanya boleh berada di level plan."
                 )
+            if self.action_validator is not None:
+                validation_error = self.action_validator(tool, args)
+                if validation_error:
+                    raise ValueError(str(validation_error))
             normalized.append({"tool": tool, "args": deepcopy(args)})
 
         plan_id = str(payload.get("id", "")).strip() or uuid4().hex
