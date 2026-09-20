@@ -37,6 +37,7 @@ from .evidence_packets import (
     load_srt,
     suggest_srt_for_video,
 )
+from .gemini_client import GeminiEvidenceClient, GeminiUnitVerification
 from .gemini_keys import (
     GeminiKeyPool,
     import_key_file,
@@ -132,6 +133,34 @@ class EvidencePacketWorker(QThread):
         self.resultReady.emit(result)
 
 
+class GeminiVerificationWorker(QThread):
+    resultReady = Signal(object)
+    errorRaised = Signal(str)
+
+    def __init__(
+        self,
+        key_pool: GeminiKeyPool,
+        packet: UnitEvidencePacket,
+        unit_context: dict,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.key_pool = key_pool
+        self.packet = packet
+        self.unit_context = unit_context
+
+    def run(self):
+        try:
+            result = GeminiEvidenceClient(self.key_pool).verify_unit(
+                self.packet,
+                unit_context=self.unit_context,
+            )
+        except Exception as exc:
+            self.errorRaised.emit(str(exc))
+            return
+        self.resultReady.emit(result)
+
+
 class MiniCutMainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -160,6 +189,7 @@ class MiniCutMainWindow(QMainWindow):
             self._gemini_key_load_error = str(exc)
         self._shot_worker: ShotDetectionWorker | None = None
         self._evidence_worker: EvidencePacketWorker | None = None
+        self._gemini_worker: GeminiVerificationWorker | None = None
         self._loading_project = False
 
         # Preview has two contexts: source-bin preview and composed timeline preview.
@@ -415,6 +445,11 @@ class MiniCutMainWindow(QMainWindow):
         self.ai_gemini_key_status.setObjectName("StatusPill")
         self.ai_import_gemini_keys = QPushButton("Import Gemini Keys")
         self.ai_import_gemini_keys.clicked.connect(self.import_gemini_keys)
+        self.ai_gemini_verify_status = QLabel("Gemini verify: belum dijalankan")
+        self.ai_gemini_verify_status.setObjectName("StatusPill")
+        self.ai_verify_gemini = QPushButton("Verifikasi Evidence dengan Gemini")
+        self.ai_verify_gemini.setEnabled(False)
+        self.ai_verify_gemini.clicked.connect(self._verify_active_evidence_gemini)
 
         self.ai_input = QPlainTextEdit()
         self.ai_input.setPlaceholderText(
@@ -454,6 +489,8 @@ class MiniCutMainWindow(QMainWindow):
         layout.addWidget(self.ai_build_evidence)
         layout.addWidget(self.ai_gemini_key_status)
         layout.addWidget(self.ai_import_gemini_keys)
+        layout.addWidget(self.ai_gemini_verify_status)
+        layout.addWidget(self.ai_verify_gemini)
         layout.addWidget(self.ai_input)
         layout.addWidget(QLabel("AI Plan / Review"))
         layout.addWidget(self.ai_plan_view)
@@ -462,6 +499,7 @@ class MiniCutMainWindow(QMainWindow):
         dock.setWidget(panel)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
         self._refresh_gemini_key_status()
+        self._refresh_gemini_verify_status()
         self._refresh_ai_plan()
 
     def import_1b2_plan(self):
@@ -895,6 +933,7 @@ class MiniCutMainWindow(QMainWindow):
             },
         )
         self._refresh_evidence_status()
+        self._refresh_gemini_verify_status()
 
         summary = packet.summary()
         size_mb = summary["image_bytes"] / (1024 * 1024)
@@ -914,6 +953,7 @@ class MiniCutMainWindow(QMainWindow):
         if worker is not None:
             worker.deleteLater()
         self._refresh_evidence_status()
+        self._refresh_gemini_verify_status()
 
     def _evidence_checkpoint_packet(
         self,
@@ -963,6 +1003,8 @@ class MiniCutMainWindow(QMainWindow):
                 f"{summary['subtitle_cues']} cue · "
                 f"{summary['image_bytes'] / (1024 * 1024):.2f} MB"
             )
+        if hasattr(self, "ai_gemini_verify_status"):
+            self._refresh_gemini_verify_status()
 
     def import_gemini_keys(self):
         filename, _ = QFileDialog.getOpenFileName(
@@ -987,6 +1029,7 @@ class MiniCutMainWindow(QMainWindow):
         added = max(0, after - before)
         self._gemini_key_load_error = ""
         self._refresh_gemini_key_status()
+        self._refresh_gemini_verify_status()
         self.statusBar().showMessage(
             f"Gemini keys tersimpan lokal · {after}/100 · {added} key baru."
         )
@@ -1017,6 +1060,181 @@ class MiniCutMainWindow(QMainWindow):
             "disabled": summary["disabled"],
             "max_keys": summary["max_keys"],
         }
+
+    def _verify_active_evidence_gemini(self):
+        if self._gemini_worker is not None:
+            self.statusBar().showMessage("Verifikasi Gemini masih berjalan.")
+            return
+
+        plan = self.v42_1b2_plan
+        unit_id = self._shot_unit_id()
+        packet = self._evidence_checkpoint_packet(unit_id)
+        if plan is None or unit_id is None or packet is None:
+            self.statusBar().showMessage(
+                "Buat evidence lokal untuk unit aktif terlebih dahulu."
+            )
+            return
+
+        key_summary = self.gemini_key_pool.summary()
+        if key_summary["ready"] <= 0:
+            if key_summary["total"] <= 0:
+                message = "Import Gemini API key terlebih dahulu."
+            else:
+                message = "Tidak ada Gemini key yang ready; key sedang cooldown/disabled."
+            self.statusBar().showMessage(message)
+            self._refresh_gemini_verify_status()
+            return
+
+        unit = plan.units.get(unit_id)
+        unit_context = dict(unit.fields) if unit is not None else {}
+        worker = GeminiVerificationWorker(
+            self.gemini_key_pool,
+            packet,
+            unit_context,
+            parent=self,
+        )
+        worker.resultReady.connect(self._gemini_verification_ready)
+        worker.errorRaised.connect(self._gemini_verification_error)
+        worker.finished.connect(self._gemini_verification_finished)
+        self._gemini_worker = worker
+
+        self.ai_verify_gemini.setEnabled(False)
+        self.ai_import_gemini_keys.setEnabled(False)
+        self.ai_gemini_verify_status.setText(
+            f"Gemini verify: memeriksa {unit_id}…"
+        )
+        self.statusBar().showMessage(
+            f"Gemini memverifikasi evidence {unit_id} dalam batch terbatas…"
+        )
+        worker.start()
+
+    def _gemini_verification_ready(self, result: GeminiUnitVerification):
+        plan = self.v42_1b2_plan
+        packet = self._evidence_checkpoint_packet(result.unit_id)
+        if plan is None or packet is None:
+            self.statusBar().showMessage(
+                "Hasil Gemini diterima tetapi evidence/unit aktif sudah berubah."
+            )
+            return
+
+        unit = plan.units.get(result.unit_id)
+        block_id = unit.block_id if unit is not None else None
+        self.record_v42_checkpoint(
+            f"gemini-{result.unit_id}",
+            block_id=block_id,
+            unit_id=result.unit_id,
+            payload={
+                "verification": result.to_dict(),
+                "summary": result.summary(),
+                "evidence_identity": {
+                    "source_fingerprint": packet.source_fingerprint,
+                    "one_b2_source_sha256": packet.one_b2_source_sha256,
+                    "srt_sha256": packet.srt_sha256,
+                    "shots": len(packet.shots),
+                    "frames": packet.frame_count,
+                },
+            },
+        )
+        self._refresh_gemini_key_status()
+        self._refresh_gemini_verify_status()
+
+        summary = result.summary()
+        self.statusBar().showMessage(
+            f"Gemini {result.unit_id} selesai · {summary['decisions']} shot · "
+            f"{summary['keep']} keep · {summary['trim']} trim · "
+            f"{summary['reject']} reject · {summary['batches']} batch."
+        )
+
+    def _gemini_verification_error(self, message: str):
+        self._refresh_gemini_key_status()
+        self.ai_gemini_verify_status.setText("Gemini verify: gagal")
+        self.statusBar().showMessage(f"Verifikasi Gemini gagal: {message}")
+
+    def _gemini_verification_finished(self):
+        worker = self._gemini_worker
+        self._gemini_worker = None
+        if worker is not None:
+            worker.deleteLater()
+        self.ai_import_gemini_keys.setEnabled(True)
+        self._refresh_gemini_key_status()
+        self._refresh_gemini_verify_status()
+
+    def _gemini_checkpoint_verification(
+        self,
+        unit_id: str | None,
+    ) -> GeminiUnitVerification | None:
+        if not unit_id:
+            return None
+        checkpoint = self.workflow_state.checkpoints.get(f"gemini-{unit_id}")
+        if not isinstance(checkpoint, dict):
+            return None
+        payload = checkpoint.get("payload")
+        if not isinstance(payload, dict):
+            return None
+        raw = payload.get("verification")
+        if not isinstance(raw, dict):
+            return None
+        try:
+            return GeminiUnitVerification.from_dict(raw)
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    def _gemini_checkpoint_is_current(self, unit_id: str | None) -> bool:
+        if not unit_id:
+            return False
+        packet = self._evidence_checkpoint_packet(unit_id)
+        checkpoint = self.workflow_state.checkpoints.get(f"gemini-{unit_id}")
+        if packet is None or not isinstance(checkpoint, dict):
+            return False
+        payload = checkpoint.get("payload")
+        if not isinstance(payload, dict):
+            return False
+        identity = payload.get("evidence_identity")
+        if not isinstance(identity, dict):
+            return False
+        return (
+            identity.get("source_fingerprint") == packet.source_fingerprint
+            and identity.get("one_b2_source_sha256") == packet.one_b2_source_sha256
+            and identity.get("srt_sha256") == packet.srt_sha256
+            and int(identity.get("shots", -1)) == len(packet.shots)
+            and int(identity.get("frames", -1)) == packet.frame_count
+        )
+
+    def _refresh_gemini_verify_status(self):
+        if not hasattr(self, "ai_gemini_verify_status"):
+            return
+        if self._gemini_worker is not None:
+            self.ai_verify_gemini.setEnabled(False)
+            return
+
+        unit_id = self._shot_unit_id()
+        packet = self._evidence_checkpoint_packet(unit_id)
+        key_summary = self.gemini_key_pool.summary()
+        self.ai_verify_gemini.setEnabled(
+            packet is not None and key_summary["ready"] > 0
+        )
+        verification = self._gemini_checkpoint_verification(unit_id)
+
+        if unit_id is None:
+            self.ai_gemini_verify_status.setText("Gemini verify: belum ada unit aktif")
+        elif packet is None:
+            self.ai_gemini_verify_status.setText(
+                f"Gemini verify {unit_id}: butuh evidence"
+            )
+        elif verification is None:
+            self.ai_gemini_verify_status.setText(
+                f"Gemini verify {unit_id}: belum dijalankan"
+            )
+        elif not self._gemini_checkpoint_is_current(unit_id):
+            self.ai_gemini_verify_status.setText(
+                f"Gemini verify {unit_id}: STALE · jalankan ulang"
+            )
+        else:
+            summary = verification.summary()
+            self.ai_gemini_verify_status.setText(
+                f"Gemini {unit_id}: {summary['keep']} keep · "
+                f"{summary['trim']} trim · {summary['reject']} reject"
+            )
 
     def _start_local_bridge(self):
         try:
@@ -1192,6 +1410,20 @@ class MiniCutMainWindow(QMainWindow):
                     "srt_ready": self._resolved_srt_path(
                         self._analysis_source_path()
                     ) is not None,
+                    "gemini_verification": (
+                        None
+                        if self._gemini_checkpoint_verification(
+                            self._shot_unit_id()
+                        ) is None
+                        else {
+                            "summary": self._gemini_checkpoint_verification(
+                                self._shot_unit_id()
+                            ).summary(),
+                            "current": self._gemini_checkpoint_is_current(
+                                self._shot_unit_id()
+                            ),
+                        }
+                    ),
                 }
             ),
             "gemini_keys": self._gemini_key_public_summary(),
@@ -1890,6 +2122,8 @@ class MiniCutMainWindow(QMainWindow):
         assert isinstance(self.gemini_key_pool, GeminiKeyPool)
         assert self.ai_gemini_key_status is not None
         assert self.ai_import_gemini_keys is not None
+        assert self.ai_gemini_verify_status is not None
+        assert self.ai_verify_gemini is not None
         assert self._timeline_timer.interval() == 33
         self.statusBar().showMessage("SELF TEST PASS")
 
