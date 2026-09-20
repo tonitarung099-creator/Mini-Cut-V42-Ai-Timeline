@@ -2,19 +2,18 @@
 
 ## Evidence we have
 
-- Editable source snapshot: `MiniCutStudio_Agent_Source.zip`.
-- Newer packaged reference build: `MiniCut-Smooth-Preview-Proxy-SmartCut-Final.zip`.
-- V42 Prompt 2–5 reference package.
+- The older editable MiniCut source snapshot exists as a retained reference outside the active build.
+- The supplied `MiniCut-Smooth-Preview-Proxy-SmartCut-Final.zip` is the newest verified behavioral reference.
+- V42 Prompt 2–5 reference material is available.
 
-## Important limitation
+## Verified gap
 
-The source snapshot predates the supplied final Windows build. The final package visibly includes newer SmartCut/proxy/Gemini-related behavior that is not proven to exist in this source snapshot.
+The newest packaged application is materially newer than the old editable source snapshot. The Final executable contains modular subsystems for core, UI, workers, subtitles, candidate generation, semantic frame resolution, Gemini, Gemini key management, bridge, agent, preview proxy and SmartCut.
 
-## Rule before UI refactor
+The active repository will therefore reconstruct a clean modular source tree instead of pretending the old monolithic snapshot is equivalent to the Final application.
 
-Do not begin a large UI rewrite until we either:
+## Safety rule
 
-1. recover/reconstruct the latest source corresponding to the final package, or
-2. deliberately port the known newer features back into this source baseline with tests.
+A feature is not considered ported merely because it exists in the Final EXE. Each capability must be reintroduced into editable source and covered by component/integration tests before the Filmora-like UI branch is considered functionally equivalent.
 
-Any feature marked present based only on the EXE package is **NOT VERIFIED IN SOURCE**.
+See `FINAL_PACKAGE_AUDIT.md` for verified evidence.

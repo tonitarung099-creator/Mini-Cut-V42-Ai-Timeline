@@ -1,0 +1,36 @@
+name: Repository Preflight
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'docs/**'
+      - 'reference/**'
+      - 'requirements.txt'
+      - '.github/workflows/repository-preflight.yml'
+
+jobs:
+  preflight:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Compile tracked Python source
+        run: python -m py_compile src/minicut_mcp.py
+      - name: Verify architecture documents
+        shell: pwsh
+        run: |
+          $required = @(
+            "docs/ARCHITECTURE.md",
+            "docs/FINAL_PACKAGE_AUDIT.md",
+            "docs/UI_FILMORA_PLAN.md",
+            "docs/V42_TIMELINE_WORKFLOW.md",
+            "docs/AI_MANAGER.md"
+          )
+          foreach ($f in $required) {
+            if (-not (Test-Path $f)) { throw "Missing required document: $f" }
+          }
+          Write-Host "Repository preflight PASS"
