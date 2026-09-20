@@ -743,6 +743,20 @@ def _batch_prompt(
         "unit_context": context,
         "shots": shots,
     }
+    prompt3_target = context.get("prompt3_target_duration_ms")
+    prompt3_rules = ""
+    if isinstance(prompt3_target, (int, float)) and int(prompt3_target) > 0:
+        prompt3_rules = (
+            " This is a Prompt 3 narration unit. The safe-padded narration audio "
+            f"duration is {int(prompt3_target)} ms and is authoritative. Final "
+            "visuals will be fitted locally at speed <=0.50x, with each final "
+            "piece >=2000 ms, film audio muted, and source order strictly "
+            "chronological. Prefer keep/trim/reject choices that can reasonably "
+            "fit that duration; use trim when the useful continuous subrange is "
+            "smaller than the full shot. Never request speed >0.50x and never "
+            "reorder shots."
+        )
+
     return (
         "Verify which supplied shots are useful candidates for the current V42 "
         "unit. Use only visible frame evidence, timestamps, labels/location, and "
@@ -750,7 +764,9 @@ def _batch_prompt(
         "or trim. Use trim only when a smaller continuous portion is clearly "
         "better; trim timestamps must remain inside that shot. Confidence is "
         "0..1. Give a short factual reason. Do not create an edit or timeline "
-        "action yet. Evidence JSON follows:\n"
+        "action yet."
+        + prompt3_rules
+        + " Evidence JSON follows:\n"
         + json.dumps(evidence, ensure_ascii=False, separators=(",", ":"))
     )
 

@@ -8,6 +8,11 @@ from .evidence_packets import ShotEvidence, UnitEvidencePacket
 from .gemini_client import GeminiShotDecision, GeminiUnitVerification
 from .timeline_model import TimelineDocument, TimelineClip
 from .v42_1b2 import V42OneB2Plan, V42UnitSpec
+from .v42_prompt3_fit import (
+    Prompt3Candidate,
+    Prompt3FitError,
+    fit_prompt3_visuals,
+)
 from .v42_regions import (
     V42RegionError,
     build_reflow_actions,
@@ -41,10 +46,11 @@ def build_verified_timeline_plan(
     document: TimelineDocument,
     expected_revision: int,
     timeline_start_ms: int | None = None,
+    narration_target_duration_ms: int | None = None,
 ) -> dict[str, Any]:
     unit = _resolve_unit(plan, packet, verification)
     _validate_target_tracks(document, unit)
-    _ensure_unit_not_already_placed(document, unit.id)
+    _ensure_unit_not_already_placed(document, unit)
 
     selections = select_verified_ranges(packet, verification)
     if not selections:
@@ -59,7 +65,29 @@ def build_verified_timeline_plan(
         selections,
     )
 
-    total_duration = sum(item.duration_ms for item in selections)
+    prompt3_fit = None
+    if unit.kind == "narration" and narration_target_duration_ms is not None:
+        try:
+            prompt3_fit = fit_prompt3_visuals(
+                [
+                    Prompt3Candidate(
+                        shot_index=item.shot_index,
+                        start_ms=item.start_ms,
+                        end_ms=item.end_ms,
+                        confidence=item.confidence,
+                        reason=item.reason,
+                        decision=item.decision,
+                    )
+                    for item in selections
+                ],
+                target_duration_ms=int(narration_target_duration_ms),
+            )
+        except Prompt3FitError as exc:
+            raise V42PlanBuildError(str(exc)) from exc
+        total_duration = prompt3_fit.target_duration_ms
+    else:
+        total_duration = sum(item.duration_ms for item in selections)
+
     reflow_actions: list[dict[str, Any]] = []
     region_note = ""
 
@@ -93,68 +121,94 @@ def build_verified_timeline_plan(
     actions: list[dict[str, Any]] = list(reflow_actions)
     cursor = start
 
-    for selection in selections:
-        if unit.kind == "narration":
+    if unit.kind == "narration" and prompt3_fit is not None:
+        for piece in prompt3_fit.pieces:
             actions.append(
                 {
                     "tool": "insert_clip",
                     "args": {
                         "source": packet.source,
                         "track_id": "V2",
-                        "source_in_ms": selection.start_ms,
-                        "source_out_ms": selection.end_ms,
+                        "source_in_ms": piece.source_in_ms,
+                        "source_out_ms": piece.source_out_ms,
                         "timeline_start_ms": cursor,
-                        "speed": 1.0,
+                        "speed": piece.speed,
                         "muted": True,
-                        "group_id": f"v42-{unit.id}-{selection.shot_index:04d}",
-                        "label": f"{unit.id} · visual · shot {selection.shot_index}",
+                        "group_id": f"v42-{unit.id}-{piece.shot_index:04d}",
+                        "label": (
+                            f"{unit.id} · visual Prompt 3 · "
+                            f"shot {piece.shot_index}"
+                        ),
                         "unit_id": unit.id,
                         "block_id": unit.block_id,
-                        "origin": "gemini_verified",
+                        "origin": "prompt3_visual",
                     },
                 }
             )
-        elif unit.kind == "anchor":
-            group_id = f"v42-{unit.id}-{selection.shot_index:04d}"
-            common = {
-                "source": packet.source,
-                "source_in_ms": selection.start_ms,
-                "source_out_ms": selection.end_ms,
-                "timeline_start_ms": cursor,
-                "speed": 1.0,
-                "group_id": group_id,
-                "unit_id": unit.id,
-                "block_id": unit.block_id,
-                "origin": "gemini_verified",
-            }
-            actions.extend(
-                [
+            cursor += piece.timeline_duration_ms
+    else:
+        for selection in selections:
+            if unit.kind == "narration":
+                actions.append(
                     {
                         "tool": "insert_clip",
                         "args": {
-                            **common,
-                            "track_id": "V1",
-                            "muted": False,
-                            "label": f"{unit.id} · jangkar · shot {selection.shot_index}",
+                            "source": packet.source,
+                            "track_id": "V2",
+                            "source_in_ms": selection.start_ms,
+                            "source_out_ms": selection.end_ms,
+                            "timeline_start_ms": cursor,
+                            "speed": 1.0,
+                            "muted": True,
+                            "group_id": f"v42-{unit.id}-{selection.shot_index:04d}",
+                            "label": f"{unit.id} · visual · shot {selection.shot_index}",
+                            "unit_id": unit.id,
+                            "block_id": unit.block_id,
+                            "origin": "gemini_verified",
                         },
-                    },
-                    {
-                        "tool": "insert_clip",
-                        "args": {
-                            **common,
-                            "track_id": "A1",
-                            "muted": False,
-                            "label": f"{unit.id} · audio jangkar · shot {selection.shot_index}",
+                    }
+                )
+            elif unit.kind == "anchor":
+                group_id = f"v42-{unit.id}-{selection.shot_index:04d}"
+                common = {
+                    "source": packet.source,
+                    "source_in_ms": selection.start_ms,
+                    "source_out_ms": selection.end_ms,
+                    "timeline_start_ms": cursor,
+                    "speed": 1.0,
+                    "group_id": group_id,
+                    "unit_id": unit.id,
+                    "block_id": unit.block_id,
+                    "origin": "gemini_verified",
+                }
+                actions.extend(
+                    [
+                        {
+                            "tool": "insert_clip",
+                            "args": {
+                                **common,
+                                "track_id": "V1",
+                                "muted": False,
+                                "label": f"{unit.id} · jangkar · shot {selection.shot_index}",
+                            },
                         },
-                    },
-                ]
-            )
-        else:
-            raise V42PlanBuildError(
-                f"Unit {unit.id} berjenis {unit.kind!r}; converter saat ini hanya N/J."
-            )
+                        {
+                            "tool": "insert_clip",
+                            "args": {
+                                **common,
+                                "track_id": "A1",
+                                "muted": False,
+                                "label": f"{unit.id} · audio jangkar · shot {selection.shot_index}",
+                            },
+                        },
+                    ]
+                )
+            else:
+                raise V42PlanBuildError(
+                    f"Unit {unit.id} berjenis {unit.kind!r}; converter saat ini hanya N/J."
+                )
 
-        cursor += selection.duration_ms
+            cursor += selection.duration_ms
 
     if len(actions) > MAX_PLAN_ACTIONS:
         raise V42PlanBuildError(
@@ -170,7 +224,11 @@ def build_verified_timeline_plan(
         "expected_revision": int(expected_revision),
         "block_id": unit.block_id,
         "unit_id": unit.id,
-        "created_by": "gemini-verification",
+        "created_by": (
+            "prompt3-visual-fit"
+            if unit.kind == "narration" and prompt3_fit is not None
+            else "gemini-verification"
+        ),
         "explanation": (
             f"Gemini memverifikasi {len(verification.decisions)} shot: "
             f"{kept} keep, {trimmed} trim, {rejected} reject. "
@@ -179,9 +237,25 @@ def build_verified_timeline_plan(
             f"{start / 1000:.3f}s."
             f"{region_note} "
             + (
-                "Unit narasi memakai V2 tanpa audio film."
-                if unit.kind == "narration"
-                else "Unit jangkar memakai pasangan V1+A1 pada speed 1×."
+                (
+                    "Prompt 3 memakai V2 tanpa audio film; durasi visual tepat "
+                    f"{prompt3_fit.timeline_duration_ms / 1000:.3f}s mengikuti A2, "
+                    f"speed {prompt3_fit.min_speed:.3f}×–"
+                    f"{prompt3_fit.max_speed:.3f}× (maksimum 0,50×), "
+                    f"{len(prompt3_fit.pieces)} potongan minimal 2,00s"
+                    + (
+                        "; peringatan: " + " ".join(prompt3_fit.warnings)
+                        if prompt3_fit.warnings
+                        else ""
+                    )
+                    + "."
+                )
+                if unit.kind == "narration" and prompt3_fit is not None
+                else (
+                    "Unit narasi memakai V2 tanpa audio film."
+                    if unit.kind == "narration"
+                    else "Unit jangkar memakai pasangan V1+A1 pada speed 1×."
+                )
             )
         ),
         "actions": actions,
@@ -276,15 +350,24 @@ def _validate_target_tracks(document: TimelineDocument, unit: V42UnitSpec) -> No
 
 def _ensure_unit_not_already_placed(
     document: TimelineDocument,
-    unit_id: str,
+    unit: V42UnitSpec,
 ) -> None:
-    owned = [clip for clip in document.clips if clip.unit_id == unit_id]
+    owned = [clip for clip in document.clips if clip.unit_id == unit.id]
+    if unit.kind == "narration":
+        # A2 narration audio belongs to the same N unit and is expected to be
+        # installed before Prompt 3 visuals. Only existing N visual clips block
+        # a new visual plan.
+        owned = [
+            clip
+            for clip in owned
+            if document.track(clip.track_id).kind == "video"
+        ]
     if not owned:
         return
     locked = any(clip.locked or document.track(clip.track_id).locked for clip in owned)
     suffix = " dan ada clip yang dikunci" if locked else ""
     raise V42PlanBuildError(
-        f"Unit {unit_id} sudah memiliki {len(owned)} clip di timeline{suffix}. "
+        f"Unit {unit.id} sudah memiliki {len(owned)} clip visual di timeline{suffix}. "
         "Gunakan workflow revisi/replace agar hasil lama tidak terduplikasi."
     )
 
