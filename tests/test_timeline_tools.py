@@ -27,6 +27,26 @@ class TimelineToolRegistryTests(unittest.TestCase):
         self.assertEqual(result["revision"], 1)
         self.assertEqual(len(self.document.clips), 1)
 
+    def test_insert_clip_passes_v42_metadata(self):
+        result = self.tools.execute(
+            "insert_clip",
+            {
+                "source": "film.mp4",
+                "track_id": "V2",
+                "source_in_ms": 1000,
+                "source_out_ms": 3000,
+                "timeline_start_ms": 0,
+                "unit_id": "N-001",
+                "block_id": "B-001",
+                "origin": "gemini_verified",
+            },
+        )
+        self.assertTrue(result["ok"])
+        clip = self.document.clips[0]
+        self.assertEqual(clip.unit_id, "N-001")
+        self.assertEqual(clip.block_id, "B-001")
+        self.assertEqual(clip.origin, "gemini_verified")
+
     def test_stale_revision_is_rejected_without_mutation(self):
         result = self.tools.execute(
             "insert_clip",
