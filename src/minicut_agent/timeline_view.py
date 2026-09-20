@@ -12,8 +12,9 @@ class TimelineView(QWidget):
     clipSelected = Signal(str)
     clipMoveRequested = Signal(str, str, int)
     clipTrimRequested = Signal(str, str, int)
+    trackControlRequested = Signal(str, str)
 
-    HEADER_WIDTH = 76
+    HEADER_WIDTH = 126
     RULER_HEIGHT = 28
     TRACK_HEIGHT = 48
     SNAP_MS = 100
@@ -65,6 +66,13 @@ class TimelineView(QWidget):
             return self.document.tracks[row].id
         return None
 
+    def _track_control_rects(self, row: int) -> tuple[QRect, QRect]:
+        y = self.RULER_HEIGHT + row * self.TRACK_HEIGHT + 8
+        return (
+            QRect(46, y, 32, self.TRACK_HEIGHT - 16),
+            QRect(84, y, 34, self.TRACK_HEIGHT - 16),
+        )
+
     def _clip_rect(self, clip) -> QRect:
         row = next((i for i, track in enumerate(self.document.tracks) if track.id == clip.track_id), 0)
         y = self.RULER_HEIGHT + row * self.TRACK_HEIGHT + 5
@@ -96,10 +104,35 @@ class TimelineView(QWidget):
             painter.drawLine(0, y + self.TRACK_HEIGHT, self.width(), y + self.TRACK_HEIGHT)
             painter.setPen(QColor("#c8ccd6"))
             painter.drawText(
-                QRect(8, y, self.HEADER_WIDTH - 16, self.TRACK_HEIGHT),
+                QRect(6, y, 34, self.TRACK_HEIGHT),
                 Qt.AlignmentFlag.AlignCenter,
                 track.name,
             )
+
+            lock_rect, mode_rect = self._track_control_rects(index)
+            painter.fillRect(
+                lock_rect,
+                QColor("#4b5260") if track.locked else QColor("#292d35"),
+            )
+            painter.setPen(QColor("#eef0f4"))
+            painter.drawText(
+                lock_rect,
+                Qt.AlignmentFlag.AlignCenter,
+                "L" if track.locked else "U",
+            )
+
+            if track.kind == "audio":
+                active = track.muted
+                label = "M" if track.muted else "A"
+            else:
+                active = not track.visible
+                label = "H" if not track.visible else "V"
+            painter.fillRect(
+                mode_rect,
+                QColor("#7b4a4f") if active else QColor("#292d35"),
+            )
+            painter.setPen(QColor("#eef0f4"))
+            painter.drawText(mode_rect, Qt.AlignmentFlag.AlignCenter, label)
 
         painter.setFont(self.font())
         visible_seconds = max(1, int((self.width() - self.HEADER_WIDTH) / self.pixels_per_second) + 2)
@@ -157,6 +190,25 @@ class TimelineView(QWidget):
 
         pos = event.position().toPoint()
         self._press_pos = pos
+
+        if pos.x() < self.HEADER_WIDTH:
+            track_id = self._track_at_y(pos.y())
+            if track_id is not None:
+                row = next(
+                    i for i, track in enumerate(self.document.tracks)
+                    if track.id == track_id
+                )
+                lock_rect, mode_rect = self._track_control_rects(row)
+                if lock_rect.contains(pos):
+                    self.trackControlRequested.emit(track_id, "lock")
+                    return
+                if mode_rect.contains(pos):
+                    track = self.document.track(track_id)
+                    control = "mute" if track.kind == "audio" else "visibility"
+                    self.trackControlRequested.emit(track_id, control)
+                    return
+            return
+
         for clip in reversed(self.document.clips):
             rect = self._clip_rect(clip)
             if rect.contains(pos):
