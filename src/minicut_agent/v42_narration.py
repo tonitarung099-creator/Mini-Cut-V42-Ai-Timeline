@@ -702,31 +702,42 @@ def _map_explicit_ids(
     script: NarrationScript,
     cues: Sequence[SubtitleCue],
 ) -> list[NarrationCueMapping] | None:
-    groups: dict[str, list[int]] = {unit_id: [] for unit_id in ordered_ids}
-    found_any = False
+    allowed = set(ordered_ids)
+    labels: list[tuple[int, str]] = []
     for index, cue in enumerate(cues):
         ids = [item.upper() for item in NARRATION_ID_RE.findall(cue.text)]
-        ids = [item for item in ids if item in groups]
+        ids = [item for item in ids if item in allowed]
+        if len(ids) > 1:
+            raise NarrationMappingError(
+                f"Cue SRT #{cue.index or index + 1} memiliki lebih dari satu label N."
+            )
         if len(ids) == 1:
-            groups[ids[0]].append(index)
-            found_any = True
-    if not found_any:
+            labels.append((index, ids[0]))
+
+    if not labels:
         return None
-    if any(not groups[unit_id] for unit_id in ordered_ids):
+
+    label_ids = [unit_id for _, unit_id in labels]
+    if label_ids != list(ordered_ids):
+        # Partial/inconsistent labels are not authoritative. Fall back to the
+        # monotonic text mapper rather than silently assigning unlabeled cues.
         return None
 
     result: list[NarrationCueMapping] = []
-    previous_end = -1
-    for unit_id in ordered_ids:
-        indexes = groups[unit_id]
-        if indexes != list(range(indexes[0], indexes[-1] + 1)):
+    for label_pos, (start_index, unit_id) in enumerate(labels):
+        end_index = (
+            labels[label_pos + 1][0]
+            if label_pos + 1 < len(labels)
+            else len(cues)
+        )
+        if end_index <= start_index:
             raise NarrationMappingError(
-                f"Cue berlabel {unit_id} tidak kontigu di SRT narasi."
+                f"Segmen cue berlabel {unit_id} tidak valid."
             )
-        selected = [cues[index] for index in indexes]
+        selected = list(cues[start_index:end_index])
         start = selected[0].start_ms
         end = selected[-1].end_ms
-        if start < previous_end:
+        if result and start < result[-1].core_end_ms:
             raise NarrationMappingError(
                 f"Urutan cue berlabel {unit_id} tidak kronologis."
             )
@@ -737,8 +748,8 @@ def _map_explicit_ids(
                 unit_id=unit_id,
                 text=script.units[unit_id].text,
                 cue_indexes=[
-                    cue.index if cue.index is not None else index + 1
-                    for index, cue in zip(indexes, selected)
+                    cue.index if cue.index is not None else start_index + offset + 1
+                    for offset, cue in enumerate(selected)
                 ],
                 core_start_ms=start,
                 core_end_ms=end,
@@ -746,7 +757,6 @@ def _map_explicit_ids(
                 method="explicit-id",
             )
         )
-        previous_end = end
     return result
 
 
