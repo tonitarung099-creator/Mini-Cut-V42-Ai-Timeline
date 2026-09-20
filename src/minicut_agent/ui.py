@@ -36,6 +36,7 @@ from .timeline_history import TimelineHistory
 from .timeline_model import TimelineDocument
 from .timeline_tools import TimelineToolRegistry
 from .timeline_view import TimelineView
+from .v42_1b2 import V42OneB2Plan, load_1b2
 from .v42_state import V42WorkflowState
 
 APP_TITLE = "MiniCut V42 AI Timeline"
@@ -77,6 +78,7 @@ class MiniCutMainWindow(QMainWindow):
         self.current_media: str | None = None
         self.project_path: Path | None = None
         self.workflow_state = V42WorkflowState()
+        self.v42_1b2_plan: V42OneB2Plan | None = None
         self._loading_project = False
 
         # Preview has two contexts: source-bin preview and composed timeline preview.
@@ -121,9 +123,13 @@ class MiniCutMainWindow(QMainWindow):
         self.action_save_project_as.setShortcut(QKeySequence.StandardKey.SaveAs)
         self.action_save_project_as.triggered.connect(self.save_project_as)
 
-        self.action_import = QAction("Import", self)
+        self.action_import = QAction("Import Media", self)
         self.action_import.setShortcut(QKeySequence("Ctrl+I"))
         self.action_import.triggered.connect(self.import_media)
+
+        self.action_import_1b2 = QAction("Import 1B2 Plan", self)
+        self.action_import_1b2.setShortcut(QKeySequence("Ctrl+Shift+I"))
+        self.action_import_1b2.triggered.connect(self.import_1b2_plan)
 
         self.action_add_timeline = QAction("Add to Timeline", self)
         self.action_add_timeline.setEnabled(False)
@@ -152,6 +158,7 @@ class MiniCutMainWindow(QMainWindow):
         file_menu = self.menuBar().addMenu("File")
         file_menu.addAction(self.action_open_project)
         file_menu.addAction(self.action_import)
+        file_menu.addAction(self.action_import_1b2)
         file_menu.addSeparator()
         file_menu.addAction(self.action_save_project)
         file_menu.addAction(self.action_save_project_as)
@@ -173,6 +180,7 @@ class MiniCutMainWindow(QMainWindow):
             self.action_open_project,
             self.action_save_project,
             self.action_import,
+            self.action_import_1b2,
             self.action_add_timeline,
             self.action_split,
             self.action_delete,
@@ -301,6 +309,10 @@ class MiniCutMainWindow(QMainWindow):
         self.ai_status = QLabel("Idle · Agent belum diaktifkan")
         self.ai_status.setObjectName("StatusPill")
         self.ai_unit = QLabel("Unit V42: —")
+        self.ai_1b2_status = QLabel("1B2: belum dimuat")
+        self.ai_1b2_status.setObjectName("StatusPill")
+        self.ai_import_1b2 = QPushButton("Import 1B2")
+        self.ai_import_1b2.clicked.connect(self.import_1b2_plan)
 
         self.ai_input = QPlainTextEdit()
         self.ai_input.setPlaceholderText(
@@ -330,6 +342,8 @@ class MiniCutMainWindow(QMainWindow):
 
         layout.addWidget(self.ai_status)
         layout.addWidget(self.ai_unit)
+        layout.addWidget(self.ai_1b2_status)
+        layout.addWidget(self.ai_import_1b2)
         layout.addWidget(self.ai_input)
         layout.addWidget(QLabel("AI Plan / Review"))
         layout.addWidget(self.ai_plan_view)
@@ -338,6 +352,140 @@ class MiniCutMainWindow(QMainWindow):
         dock.setWidget(panel)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
         self._refresh_ai_plan()
+
+    def import_1b2_plan(self):
+        filename, _ = QFileDialog.getOpenFileName(
+            self,
+            "Import V42 1B2 Plan",
+            "",
+            "V42 1B2 (*.json *.docx *.txt);;JSON (*.json);;Word (*.docx);;Text (*.txt);;All Files (*)",
+        )
+        if not filename:
+            return
+
+        try:
+            plan = load_1b2(filename)
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+            self.statusBar().showMessage(f"Gagal membaca 1B2: {exc}")
+            return
+
+        if not plan.units:
+            self.statusBar().showMessage(
+                "1B2 terbaca tetapi tidak ada unit N/J/D yang dapat digunakan."
+            )
+            return
+
+        self.v42_1b2_plan = plan
+
+        # Preserve existing meaningful progress when re-importing an updated 1B2.
+        for unit in plan.units.values():
+            if unit.kind not in {"narration", "anchor"}:
+                continue
+            existing = self.workflow_state.units.get(unit.id)
+            if isinstance(existing, dict) and existing.get("status") in {
+                "working",
+                "locked",
+                "needs_revision",
+            }:
+                continue
+            self.workflow_state.set_unit_status(
+                unit.id,
+                "pending",
+                block_id=unit.block_id,
+                timeline_revision=self.tools.revision,
+            )
+
+        next_unit = self._next_1b2_unit_id()
+        if next_unit is not None:
+            unit = plan.units[next_unit]
+            self.workflow_state.active_unit = next_unit
+            self.workflow_state.active_block = unit.block_id
+
+        self.record_v42_checkpoint(
+            "1b2-import",
+            block_id=self.workflow_state.active_block,
+            unit_id=self.workflow_state.active_unit,
+            payload={
+                "plan": plan.to_dict(),
+                "summary": plan.summary(),
+            },
+        )
+        self._refresh_1b2_status()
+
+        summary = plan.summary()
+        message = (
+            f"1B2 dimuat · {summary['blocks']} blok · {summary['units']} unit · "
+            f"{summary['candidate_ranges']} rentang kandidat"
+        )
+        if plan.warnings:
+            message += f" · {len(plan.warnings)} peringatan"
+        self.statusBar().showMessage(message)
+
+    def _restore_1b2_plan_from_workflow(self):
+        self.v42_1b2_plan = None
+        checkpoint = self.workflow_state.checkpoints.get("1b2-import")
+        if not isinstance(checkpoint, dict):
+            self._refresh_1b2_status()
+            return
+
+        payload = checkpoint.get("payload")
+        if not isinstance(payload, dict):
+            self._refresh_1b2_status()
+            return
+
+        raw_plan = payload.get("plan")
+        if not isinstance(raw_plan, dict):
+            self._refresh_1b2_status()
+            return
+
+        try:
+            self.v42_1b2_plan = V42OneB2Plan.from_dict(raw_plan)
+        except (KeyError, TypeError, ValueError):
+            self.v42_1b2_plan = None
+        self._refresh_1b2_status()
+
+    def _next_1b2_unit_id(self) -> str | None:
+        plan = self.v42_1b2_plan
+        if plan is None:
+            return None
+
+        for item in plan.work_queue:
+            unit_id = str(item).strip().upper()
+            unit = plan.units.get(unit_id)
+            if unit is None or unit.kind not in {"narration", "anchor"}:
+                continue
+            status = self.workflow_state.units.get(unit_id, {}).get("status", "pending")
+            if status != "locked":
+                return unit_id
+
+        for unit in plan.units.values():
+            if unit.kind in {"narration", "anchor"}:
+                status = self.workflow_state.units.get(unit.id, {}).get(
+                    "status", "pending"
+                )
+                if status != "locked":
+                    return unit.id
+        return None
+
+    def _refresh_1b2_status(self):
+        if not hasattr(self, "ai_1b2_status"):
+            return
+        plan = self.v42_1b2_plan
+        if plan is None:
+            self.ai_1b2_status.setText("1B2: belum dimuat")
+            return
+
+        summary = plan.summary()
+        next_unit = self._next_1b2_unit_id() or "selesai"
+        kinds = summary["unit_kinds"]
+        self.ai_1b2_status.setText(
+            "1B2 · "
+            f"{summary['blocks']} blok · "
+            f"{kinds.get('narration', 0)} N · "
+            f"{kinds.get('anchor', 0)} J · "
+            f"{summary['candidate_ranges']} kandidat · "
+            f"berikutnya {next_unit}"
+        )
 
     def _start_local_bridge(self):
         try:
@@ -488,6 +636,15 @@ class MiniCutMainWindow(QMainWindow):
             "preview_mode": self.preview_mode,
             "project_path": str(self.project_path) if self.project_path else None,
             "workflow": self.workflow_state.to_dict(),
+            "one_b2": (
+                None
+                if self.v42_1b2_plan is None
+                else {
+                    "summary": self.v42_1b2_plan.summary(),
+                    "work_queue": list(self.v42_1b2_plan.work_queue),
+                    "source_sha256": self.v42_1b2_plan.source_sha256,
+                }
+            ),
             "imported_sources": sorted(self._allowed_bridge_sources()),
         }
 
@@ -624,6 +781,7 @@ class MiniCutMainWindow(QMainWindow):
                 registry=self.tools,
             )
             self.workflow_state = workflow
+            self._restore_1b2_plan_from_workflow()
             self.project_path = Path(filename)
 
             self.media_list.clear()
@@ -1168,6 +1326,8 @@ class MiniCutMainWindow(QMainWindow):
         assert self.local_bridge.running
         assert self.local_bridge.url.startswith("http://127.0.0.1:")
         assert isinstance(self.workflow_state, V42WorkflowState)
+        assert self.v42_1b2_plan is None
+        assert self.ai_1b2_status is not None
         assert self._timeline_timer.interval() == 33
         self.statusBar().showMessage("SELF TEST PASS")
 
