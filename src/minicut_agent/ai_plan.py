@@ -42,9 +42,11 @@ class TimelinePlanManager:
         registry: TimelineToolRegistry,
         *,
         action_validator: Callable[[str, dict[str, Any]], str | None] | None = None,
+        plan_validator: Callable[[TimelinePlan], str | None] | None = None,
     ):
         self.registry = registry
         self.action_validator = action_validator
+        self.plan_validator = plan_validator
         self.pending: TimelinePlan | None = None
 
     def propose(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -67,6 +69,11 @@ class TimelinePlanManager:
                 ),
             )
 
+        if self.plan_validator is not None:
+            validation_error = self.plan_validator(plan)
+            if validation_error:
+                return self._error("plan_validation_failed", str(validation_error))
+
         self.pending = plan
         return self._ok("propose_plan", plan.to_dict())
 
@@ -88,6 +95,14 @@ class TimelinePlanManager:
             return self._error("no_pending_plan", "Tidak ada AI plan yang menunggu.")
 
         plan = self.pending
+
+        if self.plan_validator is not None:
+            validation_error = self.plan_validator(plan)
+            if validation_error:
+                return self._error(
+                    "plan_revalidation_failed",
+                    str(validation_error),
+                )
 
         if self.action_validator is not None:
             for index, action in enumerate(plan.actions):
