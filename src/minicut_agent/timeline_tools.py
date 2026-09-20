@@ -43,6 +43,10 @@ class TimelineToolRegistry:
         self.revision = revision
 
     @property
+    def mutation_tool_names(self) -> tuple[str, ...]:
+        return tuple(self._handlers.keys())
+
+    @property
     def tool_names(self) -> tuple[str, ...]:
         return (
             "get_state",

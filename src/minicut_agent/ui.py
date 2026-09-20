@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from uuid import uuid4
@@ -28,6 +29,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .ai_plan import TimelinePlanManager
 from .bridge import BridgeRouter, LocalTimelineBridge, QtBridgeDispatcher
 from .project_store import apply_project, load_project, save_project as save_project_file
 from .timeline_history import TimelineHistory
@@ -67,6 +69,10 @@ class MiniCutMainWindow(QMainWindow):
         self.document = TimelineDocument.default()
         self.history = TimelineHistory(self.document)
         self.tools = TimelineToolRegistry(self.document, self.history)
+        self.plan_manager = TimelinePlanManager(
+            self.tools,
+            action_validator=self._validate_ai_plan_action,
+        )
         self.media_durations: dict[str, int] = {}
         self.current_media: str | None = None
         self.project_path: Path | None = None
@@ -295,19 +301,43 @@ class MiniCutMainWindow(QMainWindow):
         self.ai_status = QLabel("Idle · Agent belum diaktifkan")
         self.ai_status.setObjectName("StatusPill")
         self.ai_unit = QLabel("Unit V42: —")
+
         self.ai_input = QPlainTextEdit()
         self.ai_input.setPlaceholderText(
-            "Nanti kamu bisa menulis: “Kerjakan B-001”, “Cari visual lain untuk N-007”, dll."
+            "Nanti: “Kerjakan B-001”, “Cari visual lain untuk N-007”, dll."
         )
-        self.ai_input.setMaximumHeight(110)
+        self.ai_input.setMaximumHeight(90)
+
+        self.ai_plan_view = QPlainTextEdit()
+        self.ai_plan_view.setReadOnly(True)
+        self.ai_plan_view.setPlaceholderText(
+            "Belum ada AI plan. Plan dari MCP/Gemini akan muncul di sini sebelum timeline berubah."
+        )
+        self.ai_plan_view.setMinimumHeight(160)
+
+        plan_buttons = QHBoxLayout()
+        self.ai_apply_plan = QPushButton("Apply Plan")
+        self.ai_apply_plan.setEnabled(False)
+        self.ai_apply_plan.clicked.connect(self._apply_ai_plan)
+        self.ai_cancel_plan = QPushButton("Cancel Plan")
+        self.ai_cancel_plan.setEnabled(False)
+        self.ai_cancel_plan.clicked.connect(self._cancel_ai_plan)
+        plan_buttons.addWidget(self.ai_apply_plan)
+        plan_buttons.addWidget(self.ai_cancel_plan)
+
         self.ai_run = QPushButton("Jalankan AI")
         self.ai_run.setEnabled(False)
+
         layout.addWidget(self.ai_status)
         layout.addWidget(self.ai_unit)
         layout.addWidget(self.ai_input)
+        layout.addWidget(QLabel("AI Plan / Review"))
+        layout.addWidget(self.ai_plan_view)
+        layout.addLayout(plan_buttons)
         layout.addWidget(self.ai_run)
         dock.setWidget(panel)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
+        self._refresh_ai_plan()
 
     def _start_local_bridge(self):
         try:
@@ -317,6 +347,8 @@ class MiniCutMainWindow(QMainWindow):
                 seek_handler=self._bridge_seek,
                 allowed_sources_provider=self._allowed_bridge_sources,
                 mutation_callback=self._bridge_mutation,
+                plan_manager=self.plan_manager,
+                plan_callback=self._refresh_ai_plan,
             )
             self.bridge_dispatcher = QtBridgeDispatcher(
                 self.bridge_router,
@@ -329,6 +361,118 @@ class MiniCutMainWindow(QMainWindow):
             self.local_bridge = None
             self.ai_status.setText("Bridge lokal gagal aktif")
             self.statusBar().showMessage(f"Bridge lokal gagal: {exc}")
+
+    def _validate_ai_plan_action(self, tool: str, args: dict) -> str | None:
+        if tool != "insert_clip":
+            return None
+        source = str(args.get("source", ""))
+        if not source or source not in self._allowed_bridge_sources():
+            return "AI hanya boleh memasukkan media yang sudah di-import ke proyek."
+        return None
+
+    def _refresh_ai_plan(self):
+        if not hasattr(self, "ai_plan_view"):
+            return
+
+        plan = self.plan_manager.pending
+        if plan is None:
+            self.ai_plan_view.clear()
+            self.ai_unit.setText("Unit V42: —")
+            self.ai_apply_plan.setEnabled(False)
+            self.ai_cancel_plan.setEnabled(False)
+            if hasattr(self, "ai_status"):
+                self.ai_status.setText(
+                    f"Local timeline tools ready · rev {self.tools.revision}"
+                )
+            return
+
+        stale = plan.expected_revision != self.tools.revision
+        header = [
+            f"{'[STALE] ' if stale else ''}{plan.title}",
+            f"Plan ID: {plan.id}",
+            f"Expected revision: {plan.expected_revision}",
+            f"Current revision: {self.tools.revision}",
+        ]
+        if plan.explanation:
+            header.extend(["", plan.explanation])
+        header.append("")
+        header.append(f"Actions ({len(plan.actions)}):")
+        for index, action in enumerate(plan.actions, start=1):
+            args_text = json.dumps(
+                action.get("args", {}),
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            header.append(f"{index}. {action['tool']} {args_text}")
+
+        self.ai_plan_view.setPlainText("\n".join(header))
+        unit = plan.unit_id or "—"
+        if plan.block_id:
+            unit = f"{plan.block_id} / {unit}"
+        self.ai_unit.setText(f"Unit V42: {unit}")
+        self.ai_apply_plan.setEnabled(not stale)
+        self.ai_cancel_plan.setEnabled(True)
+        self.ai_status.setText(
+            "AI plan stale · Cancel dan buat ulang"
+            if stale
+            else "AI plan menunggu review · belum mengubah timeline"
+        )
+
+    def _apply_ai_plan(self):
+        plan = self.plan_manager.pending
+        if plan is None:
+            self._refresh_ai_plan()
+            return
+
+        result = self.plan_manager.apply()
+        if not result.get("ok"):
+            message = str(
+                result.get("error", {}).get("message", "AI plan gagal diterapkan.")
+            )
+            self.statusBar().showMessage(message)
+            self._refresh_ai_plan()
+            return
+
+        applied = result["plan"]
+        unit_id = applied.get("unit_id")
+        block_id = applied.get("block_id")
+        if unit_id:
+            self.workflow_state.active_unit = str(unit_id)
+            if block_id:
+                self.workflow_state.active_block = str(block_id)
+            self.workflow_state.set_unit_status(
+                str(unit_id),
+                "working",
+                block_id=(None if not block_id else str(block_id)),
+                timeline_revision=self.tools.revision,
+                note=f"AI plan diterapkan: {applied.get('title', '')}",
+            )
+            self.record_v42_checkpoint(
+                f"plan-{applied['id']}",
+                block_id=(None if not block_id else str(block_id)),
+                unit_id=str(unit_id),
+                payload={
+                    "title": applied.get("title", ""),
+                    "action_count": len(applied.get("actions", [])),
+                },
+            )
+
+        self.timeline.clear_selection()
+        self._clear_inspector()
+        self._timeline_changed(
+            f"AI plan diterapkan · rev {self.tools.revision}"
+        )
+        self._refresh_ai_plan()
+
+    def _cancel_ai_plan(self):
+        result = self.plan_manager.cancel()
+        if result.get("ok"):
+            self.statusBar().showMessage("AI plan dibatalkan. Timeline tidak berubah.")
+        else:
+            self.statusBar().showMessage(
+                str(result.get("error", {}).get("message", "Tidak ada plan."))
+            )
+        self._refresh_ai_plan()
 
     def _allowed_bridge_sources(self) -> set[str]:
         sources = {clip.source for clip in self.document.clips}
@@ -471,6 +615,8 @@ class MiniCutMainWindow(QMainWindow):
 
         self._loading_project = True
         try:
+            if self.plan_manager.pending is not None:
+                self.plan_manager.cancel()
             apply_project(
                 snapshot,
                 document=self.document,
@@ -514,6 +660,7 @@ class MiniCutMainWindow(QMainWindow):
             self._clear_inspector()
             self._timeline_changed()
             self._sync_timeline_preview(target, autoplay=False, force_seek=True)
+            self._refresh_ai_plan()
 
             if snapshot.missing_sources:
                 self.statusBar().showMessage(
@@ -779,9 +926,7 @@ class MiniCutMainWindow(QMainWindow):
         self.action_undo.setEnabled(self.history.can_undo)
         self.action_redo.setEnabled(self.history.can_redo)
         if hasattr(self, "ai_status"):
-            self.ai_status.setText(
-                f"Local timeline tools ready · rev {self.tools.revision}"
-            )
+            self._refresh_ai_plan()
 
     @staticmethod
     def _tool_error_message(result: dict) -> str:
@@ -1017,6 +1162,7 @@ class MiniCutMainWindow(QMainWindow):
         assert self.findChild(QDockWidget, "AIAgentDock") is not None
         assert self.history.document is self.document
         assert self.tools.document is self.document
+        assert self.plan_manager.registry is self.tools
         assert "trim_clip" in self.tools.tool_names
         assert self.local_bridge is not None
         assert self.local_bridge.running

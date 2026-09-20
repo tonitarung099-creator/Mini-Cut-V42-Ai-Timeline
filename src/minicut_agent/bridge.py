@@ -10,6 +10,7 @@ from typing import Any, Callable
 
 from PySide6.QtCore import QObject, Qt, Signal, Slot
 
+from .ai_plan import TimelinePlanManager
 from .bridge_discovery import remove_discovery, write_discovery
 from .timeline_tools import TimelineToolRegistry
 
@@ -27,22 +28,31 @@ class BridgeRouter:
         seek_handler: Callable[[int], dict[str, Any]] | None = None,
         allowed_sources_provider: Callable[[], set[str]] | None = None,
         mutation_callback: Callable[[], None] | None = None,
+        plan_manager: TimelinePlanManager | None = None,
+        plan_callback: Callable[[], None] | None = None,
     ):
         self.registry = registry
         self.state_provider = state_provider or (lambda: {})
         self.seek_handler = seek_handler
         self.allowed_sources_provider = allowed_sources_provider or (lambda: set())
         self.mutation_callback = mutation_callback
+        self.plan_manager = plan_manager
+        self.plan_callback = plan_callback
 
     def state(self) -> dict[str, Any]:
         state = self.registry.state()
         extra = dict(self.state_provider() or {})
         state.update(extra)
-        state["bridge_tools"] = [
-            *self.registry.tool_names,
-            "batch",
-            "seek",
-        ]
+        state["bridge_tools"] = ["get_state", "seek"]
+        if self.plan_manager is not None:
+            state["bridge_tools"].extend(
+                ["propose_plan", "get_pending_plan", "cancel_plan"]
+            )
+            state["pending_plan"] = (
+                None
+                if self.plan_manager.pending is None
+                else self.plan_manager.pending.to_dict()
+            )
         return state
 
     def execute(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -74,6 +84,48 @@ class BridgeRouter:
                 "result": self.state(),
             }
 
+        if tool in {"propose_plan", "get_pending_plan", "cancel_plan"}:
+            if self.plan_manager is None:
+                return self._error(tool, "unsupported", "AI plan manager belum tersedia.")
+
+            if tool == "get_pending_plan":
+                return self.plan_manager.get_pending()
+
+            if tool == "cancel_plan":
+                result = self.plan_manager.cancel()
+                if result.get("ok"):
+                    self._notify_plan()
+                return result
+
+            actions = args.get("actions", [])
+            if not isinstance(actions, list):
+                return self._error(
+                    tool, "validation_error", "actions plan harus berupa array."
+                )
+            for action in actions:
+                if not isinstance(action, dict):
+                    return self._error(
+                        tool, "validation_error", "Setiap action plan harus berupa object."
+                    )
+                action_tool = str(action.get("tool", ""))
+                action_args = dict(action.get("args") or {})
+                source_error = self._validate_insert_source(action_tool, action_args)
+                if source_error is not None:
+                    source_error["tool"] = tool
+                    return source_error
+
+            result = self.plan_manager.propose(args)
+            if result.get("ok"):
+                self._notify_plan()
+            return result
+
+        if tool in set(self.registry.mutation_tool_names) | {"undo", "redo"}:
+            return self._error(
+                tool,
+                "review_required",
+                "AI eksternal harus mengajukan propose_plan; perubahan timeline diterapkan dari UI setelah review.",
+            )
+
         source_error = self._validate_insert_source(tool, args)
         if source_error is not None:
             return source_error
@@ -84,25 +136,11 @@ class BridgeRouter:
         return result
 
     def batch(self, payload: dict[str, Any]) -> dict[str, Any]:
-        actions = payload.get("actions")
-        if not isinstance(actions, list):
-            return self._error("batch", "validation_error", "actions harus berupa array.")
-
-        for action in actions:
-            if not isinstance(action, dict):
-                return self._error("batch", "validation_error", "Setiap action harus berupa object.")
-            tool = str(action.get("tool", ""))
-            args = dict(action.get("args") or {})
-            source_error = self._validate_insert_source(tool, args)
-            if source_error is not None:
-                source_error["tool"] = "batch"
-                return source_error
-
-        expected = payload.get("expected_revision")
-        result = self.registry.execute_batch(actions, expected_revision=expected)
-        if result.get("ok"):
-            self._notify_mutation()
-        return result
+        return self._error(
+            "batch",
+            "review_required",
+            "AI eksternal harus mengajukan propose_plan; batch langsung dinonaktifkan.",
+        )
 
     def _validate_insert_source(
         self, tool: str, args: dict[str, Any]
@@ -122,6 +160,10 @@ class BridgeRouter:
     def _notify_mutation(self) -> None:
         if self.mutation_callback is not None:
             self.mutation_callback()
+
+    def _notify_plan(self) -> None:
+        if self.plan_callback is not None:
+            self.plan_callback()
 
     def _error(self, tool: str, code: str, message: str) -> dict[str, Any]:
         return {
