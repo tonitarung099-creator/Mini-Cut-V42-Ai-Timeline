@@ -15,28 +15,29 @@
 - Desktop + MCP Windows EXE packaging: VERIFIED.
 - Project save/load + autosave + durable V42 checkpoints: VERIFIED.
 - Review-first AI Plan / Review / Apply layer: VERIFIED.
-- V42 1B2 parser/import + durable normalized plan: VERIFIED and merged.
-- Candidate-constrained local shot/camera-cut detection: IMPLEMENTED in current milestone; CI verification required.
-- Sparse frame + SRT evidence packet builder: NOT STARTED.
+- V42 1B2 parser/import + durable normalized plan: VERIFIED.
+- Candidate-constrained local shot/camera-cut detection: VERIFIED and merged.
+- Sparse frame extraction + SRT overlap evidence packets: IMPLEMENTED in current milestone; CI verification required.
 - Gemini multi-key manager/failover reconstruction: NOT STARTED.
+- Gemini evidence request/response schema: NOT STARTED.
 - V42 Prompt 2–5 workflow engine: NOT STARTED.
 - Final FFmpeg/SmartCut export reconstruction: NOT STARTED.
 
 ## Architecture rule
 
-The timeline remains the single source of truth. 1B2 defines where MiniCut is allowed to look for candidate visuals. Local analysis narrows those candidate ranges into shot segments before any cloud-model verification is considered.
+The timeline remains the single source of truth. 1B2 constrains where local analysis may inspect the film. Local shot detection narrows those ranges, then sparse frame + SRT packets provide compact evidence. No cloud provider receives continuous video by default.
 
 ## Current milestone
 
-For the active N/J unit, MiniCut analyzes only the unit's 1B2 candidate timestamp ranges with local FFmpeg scene-change detection. Results are stored as absolute shot segments in a durable per-unit checkpoint. The UI remains responsive because detection runs on a worker thread.
+For an active N/J unit with local shot analysis, MiniCut extracts up to three small JPEG frames per shot and attaches only overlapping SRT cues. Frames are cached locally. A durable `evidence-<UNIT>` checkpoint stores packet metadata and identity hashes; bridge state exposes only a compact summary.
 
 ## Next technically justified action
 
-After local shot-detection CI passes:
+After evidence-packet CI passes:
 
-1. extract sparse representative frames (start/middle/end) from detected shots,
-2. parse film SRT and attach only overlapping subtitle lines,
-3. build compact per-unit evidence packets,
-4. estimate/limit evidence size before cloud requests,
-5. reconstruct Gemini multi-key/failover against those packets,
-6. implement Prompt 2–5 orchestration and final export.
+1. implement Gemini API key pool supporting many keys without storing secrets in project files,
+2. add per-key health/cooldown/quota state and automatic failover,
+3. define bounded Gemini request batches over evidence packets,
+4. validate structured Gemini decisions against 1B2/V42 and convert them to review-first AI plans,
+5. implement Prompt 2–5 orchestration,
+6. reconstruct final FFmpeg/SmartCut export.
