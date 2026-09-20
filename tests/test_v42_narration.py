@@ -1,0 +1,171 @@
+import subprocess
+import tempfile
+import unittest
+from pathlib import Path
+
+from minicut_agent.evidence_packets import SubtitleCue
+from minicut_agent.v42_1b2 import V42BlockSpec, V42OneB2Plan, V42UnitSpec
+from minicut_agent.v42_narration import (
+    FFmpegSilenceDetector,
+    NarrationCueMapping,
+    NarrationMappingError,
+    SilenceInterval,
+    map_narration_cues,
+    parse_narration_script_text,
+    parse_silencedetect,
+    refine_safe_padding,
+)
+
+
+class NarrationMappingTests(unittest.TestCase):
+    def plan(self):
+        return V42OneB2Plan(
+            source_path="1b2.json",
+            source_sha256="hash",
+            blocks={
+                "B-001": V42BlockSpec(
+                    id="B-001",
+                    display_order=["N-001", "J-001", "N-002"],
+                    unit_ids=["N-001", "J-001", "N-002"],
+                )
+            },
+            units={
+                "N-001": V42UnitSpec("N-001", "narration", "B-001"),
+                "J-001": V42UnitSpec("J-001", "anchor", "B-001"),
+                "N-002": V42UnitSpec("N-002", "narration", "B-001"),
+            },
+        )
+
+    def script(self):
+        return parse_narration_script_text(
+            """BAGIAN A TEKNIS
+N-001: versi teknis lama
+NASKAH BERSIH FINAL — SUMBER AUDIO NARASI
+N-001: Pada pagi hari Toni masuk ke kantor.
+J-001
+D-001: Halo.
+N-002
+Kemudian ia membuka berkas rahasia di meja.
+"""
+        )
+
+    def test_final_section_only_is_parsed(self):
+        script = self.script()
+        self.assertEqual(
+            script.units["N-001"].text,
+            "Pada pagi hari Toni masuk ke kantor.",
+        )
+        self.assertEqual(
+            script.units["N-002"].text,
+            "Kemudian ia membuka berkas rahasia di meja.",
+        )
+        self.assertNotIn("versi teknis lama", script.units["N-001"].text)
+
+    def test_missing_final_section_is_rejected(self):
+        with self.assertRaises(NarrationMappingError):
+            parse_narration_script_text("N-001: teks tanpa final section")
+
+    def test_explicit_srt_ids_map_directly(self):
+        cues = [
+            SubtitleCue(1000, 3000, "N-001: Pada pagi hari Toni masuk ke kantor.", 1),
+            SubtitleCue(4000, 7000, "N-002: Kemudian ia membuka berkas rahasia di meja.", 2),
+        ]
+        mapped = map_narration_cues(self.script(), cues, self.plan())
+        self.assertEqual([item.unit_id for item in mapped], ["N-001", "N-002"])
+        self.assertTrue(all(item.method == "explicit-id" for item in mapped))
+        self.assertEqual((mapped[0].core_start_ms, mapped[0].core_end_ms), (1000, 3000))
+
+    def test_unlabeled_srt_is_grouped_monotonically_by_text(self):
+        cues = [
+            SubtitleCue(1000, 1800, "Pada pagi hari", 1),
+            SubtitleCue(1800, 3000, "Toni masuk ke kantor.", 2),
+            SubtitleCue(4000, 5200, "Kemudian ia membuka", 3),
+            SubtitleCue(5200, 7000, "berkas rahasia di meja.", 4),
+        ]
+        mapped = map_narration_cues(self.script(), cues, self.plan())
+        self.assertEqual([item.cue_indexes for item in mapped], [[1, 2], [3, 4]])
+        self.assertTrue(all(item.similarity > 0.8 for item in mapped))
+
+    def test_unrelated_srt_is_rejected(self):
+        cues = [
+            SubtitleCue(0, 1000, "cuaca cerah sekali", 1),
+            SubtitleCue(1000, 2000, "mobil melaju cepat", 2),
+        ]
+        with self.assertRaises(NarrationMappingError):
+            map_narration_cues(self.script(), cues, self.plan())
+
+    def test_silencedetect_parser_makes_absolute_intervals(self):
+        log = """
+[silencedetect] silence_start: 0.1
+[silencedetect] silence_end: 0.42 | silence_duration: 0.32
+[silencedetect] silence_start: 2.0
+[silencedetect] silence_end: 2.5 | silence_duration: 0.5
+"""
+        intervals = parse_silencedetect(
+            log,
+            window_start_ms=1000,
+            window_end_ms=5000,
+        )
+        self.assertEqual(
+            [(item.start_ms, item.end_ms) for item in intervals],
+            [(1100, 1420), (3000, 3500)],
+        )
+
+    def test_safe_padding_uses_waveform_silence(self):
+        mapping = NarrationCueMapping(
+            "N-001",
+            "teks",
+            [1],
+            1500,
+            3000,
+            0.95,
+            "monotonic-text",
+        )
+        timing = refine_safe_padding(
+            mapping,
+            [
+                SilenceInterval(1000, 1450),
+                SilenceInterval(3050, 3600),
+            ],
+            lower_bound=800,
+            upper_bound=4000,
+            before_padding_ms=250,
+            after_padding_ms=350,
+        )
+        self.assertEqual(timing.source_in_ms, 1200)
+        self.assertEqual(timing.source_out_ms, 3400)
+        self.assertEqual(timing.pre_padding_ms, 300)
+        self.assertEqual(timing.post_padding_ms, 400)
+        self.assertEqual(
+            timing.boundary_method,
+            "waveform-silence/waveform-silence",
+        )
+
+    def test_detector_scans_only_local_window(self):
+        commands = []
+
+        def fake_runner(command, **kwargs):
+            commands.append(command)
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout="",
+                stderr=(
+                    "[silencedetect] silence_start: 0.0\n"
+                    "[silencedetect] silence_end: 0.2 | silence_duration: 0.2\n"
+                ),
+            )
+
+        detector = FFmpegSilenceDetector(
+            ffmpeg_path="ffmpeg",
+            runner=fake_runner,
+        )
+        intervals = detector.detect("narration.wav", 5000, 9000)
+        command = commands[0]
+        self.assertEqual(command[command.index("-ss") + 1], "5.000")
+        self.assertEqual(command[command.index("-t") + 1], "4.000")
+        self.assertEqual((intervals[0].start_ms, intervals[0].end_ms), (5000, 5200))
+
+
+if __name__ == "__main__":
+    unittest.main()
