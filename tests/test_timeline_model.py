@@ -1,5 +1,6 @@
 import unittest
 
+from minicut_agent.timeline_history import TimelineHistory
 from minicut_agent.timeline_model import TimelineDocument
 
 
@@ -33,6 +34,124 @@ class TimelineDocumentTests(unittest.TestCase):
         )
         with self.assertRaises(ValueError):
             doc.move_clip(clip.id, timeline_start_ms=-1)
+
+    def test_move_rejects_cross_kind_track(self):
+        doc = TimelineDocument.default()
+        clip = doc.insert_clip(
+            source="film.mp4",
+            track_id="V1",
+            source_in_ms=0,
+            source_out_ms=1000,
+            timeline_start_ms=0,
+        )
+        with self.assertRaises(ValueError):
+            doc.move_clip(clip.id, track_id="A1")
+
+    def test_linked_move_preserves_av_sync(self):
+        doc = TimelineDocument.default()
+        video = doc.insert_clip(
+            source="film.mp4",
+            track_id="V1",
+            source_in_ms=0,
+            source_out_ms=10000,
+            timeline_start_ms=1000,
+            group_id="g1",
+        )
+        audio = doc.insert_clip(
+            source="film.mp4",
+            track_id="A1",
+            source_in_ms=0,
+            source_out_ms=10000,
+            timeline_start_ms=1000,
+            group_id="g1",
+        )
+        doc.move_linked(video.id, timeline_start_ms=4000, track_id="V2")
+        self.assertEqual(video.timeline_start_ms, 4000)
+        self.assertEqual(audio.timeline_start_ms, 4000)
+        self.assertEqual(video.track_id, "V2")
+        self.assertEqual(audio.track_id, "A1")
+
+    def test_split_linked_splits_video_and_audio(self):
+        doc = TimelineDocument.default()
+        video = doc.insert_clip(
+            source="film.mp4",
+            track_id="V1",
+            source_in_ms=1000,
+            source_out_ms=11000,
+            timeline_start_ms=5000,
+            group_id="g1",
+        )
+        doc.insert_clip(
+            source="film.mp4",
+            track_id="A1",
+            source_in_ms=1000,
+            source_out_ms=11000,
+            timeline_start_ms=5000,
+            group_id="g1",
+        )
+
+        created = doc.split_linked_at(video.id, 9000)
+        self.assertEqual(len(created), 2)
+        self.assertEqual(len(doc.clips), 4)
+        left_video = doc.clip(video.id)
+        right_video = next(c for c in created if c.track_id == "V1")
+        self.assertEqual(left_video.source_out_ms, 5000)
+        self.assertEqual(right_video.source_in_ms, 5000)
+        self.assertEqual(right_video.timeline_start_ms, 9000)
+        self.assertNotEqual(left_video.group_id, right_video.group_id)
+
+    def test_remove_linked_removes_av_pair(self):
+        doc = TimelineDocument.default()
+        video = doc.insert_clip(
+            source="film.mp4",
+            track_id="V1",
+            source_in_ms=0,
+            source_out_ms=1000,
+            timeline_start_ms=0,
+            group_id="g1",
+        )
+        doc.insert_clip(
+            source="film.mp4",
+            track_id="A1",
+            source_in_ms=0,
+            source_out_ms=1000,
+            timeline_start_ms=0,
+            group_id="g1",
+        )
+        removed = doc.remove_linked(video.id)
+        self.assertEqual(len(removed), 2)
+        self.assertEqual(doc.clips, [])
+
+    def test_history_cancel_checkpoint_removes_rejected_operation(self):
+        doc = TimelineDocument.default()
+        history = TimelineHistory(doc)
+        history.checkpoint()
+        self.assertTrue(history.can_undo)
+        self.assertTrue(history.cancel_checkpoint())
+        self.assertFalse(history.can_undo)
+
+    def test_history_undo_redo_preserves_document_identity(self):
+        doc = TimelineDocument.default()
+        history = TimelineHistory(doc)
+        original_id = id(doc)
+
+        history.checkpoint()
+        doc.insert_clip(
+            source="film.mp4",
+            track_id="V1",
+            source_in_ms=0,
+            source_out_ms=1000,
+            timeline_start_ms=0,
+        )
+        self.assertEqual(len(doc.clips), 1)
+
+        self.assertTrue(history.undo())
+        self.assertEqual(len(doc.clips), 0)
+        self.assertEqual(id(doc), original_id)
+
+        self.assertTrue(history.redo())
+        self.assertEqual(len(doc.clips), 1)
+        self.assertEqual(id(doc), original_id)
 
 
 if __name__ == "__main__":
