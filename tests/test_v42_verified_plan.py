@@ -89,6 +89,102 @@ class VerifiedTimelinePlanTests(unittest.TestCase):
         self.assertEqual(first["args"]["origin"], "gemini_verified")
         self.assertEqual(doc.clips, [])
 
+    def test_prompt3_visuals_fit_authoritative_a2_duration_at_max_half_speed(self):
+        doc = TimelineDocument.default()
+        doc.insert_clip(
+            source="narration.wav",
+            track_id="A2",
+            source_in_ms=0,
+            source_out_ms=10000,
+            timeline_start_ms=0,
+            speed=1.0,
+            unit_id="N-001",
+            block_id="B-001",
+            origin="narration_audio",
+        )
+        payload = build_verified_timeline_plan(
+            plan=self.plan(),
+            packet=self.packet(),
+            verification=verification("N-001", self.decisions()),
+            document=doc,
+            expected_revision=0,
+            narration_target_duration_ms=10000,
+        )
+        self.assertEqual(payload["created_by"], "prompt3-visual-fit")
+        inserts = [
+            action for action in payload["actions"]
+            if action["tool"] == "insert_clip"
+            and action["args"].get("origin") == "prompt3_visual"
+        ]
+        self.assertEqual(len(inserts), 2)
+        self.assertEqual(inserts[0]["args"]["timeline_start_ms"], 0)
+        self.assertEqual(inserts[1]["args"]["timeline_start_ms"], 6000)
+        self.assertAlmostEqual(inserts[0]["args"]["speed"], 0.5)
+        self.assertAlmostEqual(inserts[1]["args"]["speed"], 0.5)
+        self.assertTrue(all(action["args"]["muted"] for action in inserts))
+        total = sum(
+            round(
+                (action["args"]["source_out_ms"] - action["args"]["source_in_ms"])
+                / action["args"]["speed"]
+            )
+            for action in inserts
+        )
+        self.assertEqual(total, 10000)
+
+    def test_prompt3_can_use_existing_a2_but_not_existing_v2(self):
+        doc = TimelineDocument.default()
+        doc.insert_clip(
+            source="narration.wav",
+            track_id="A2",
+            source_in_ms=0,
+            source_out_ms=10000,
+            timeline_start_ms=0,
+            unit_id="N-001",
+            block_id="B-001",
+            origin="narration_audio",
+        )
+        payload = build_verified_timeline_plan(
+            plan=self.plan(),
+            packet=self.packet(),
+            verification=verification("N-001", self.decisions()),
+            document=doc,
+            expected_revision=0,
+            narration_target_duration_ms=10000,
+        )
+        self.assertTrue(payload["actions"])
+
+        doc.insert_clip(
+            source="film.mp4",
+            track_id="V2",
+            source_in_ms=1000,
+            source_out_ms=2000,
+            timeline_start_ms=0,
+            unit_id="N-001",
+            block_id="B-001",
+            origin="prompt3_visual",
+        )
+        with self.assertRaises(V42PlanBuildError):
+            build_verified_timeline_plan(
+                plan=self.plan(),
+                packet=self.packet(),
+                verification=verification("N-001", self.decisions()),
+                document=doc,
+                expected_revision=0,
+                narration_target_duration_ms=10000,
+            )
+
+    def test_prompt3_impossible_duration_returns_revision_instead_of_speeding_up(self):
+        doc = TimelineDocument.default()
+        with self.assertRaisesRegex(V42PlanBuildError, "PERLU REVISI"):
+            build_verified_timeline_plan(
+                plan=self.plan(),
+                packet=self.packet(),
+                verification=verification("N-001", self.decisions()),
+                document=doc,
+                expected_revision=0,
+                narration_target_duration_ms=3000,
+            )
+
     def test_anchor_builds_linked_video_audio_pairs(self):
         doc = TimelineDocument.default()
         packet = self.packet("J-001")
