@@ -224,7 +224,11 @@ def build_verified_timeline_plan(
         "expected_revision": int(expected_revision),
         "block_id": unit.block_id,
         "unit_id": unit.id,
-        "created_by": "gemini-verification",
+        "created_by": (
+            "prompt3-visual-fit"
+            if unit.kind == "narration" and prompt3_fit is not None
+            else "gemini-verification"
+        ),
         "explanation": (
             f"Gemini memverifikasi {len(verification.decisions)} shot: "
             f"{kept} keep, {trimmed} trim, {rejected} reject. "
