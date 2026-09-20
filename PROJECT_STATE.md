@@ -13,28 +13,29 @@
 - Shared Timeline Tool Registry: VERIFIED.
 - Localhost timeline bridge + timeline-native MCP: VERIFIED.
 - Desktop + MCP Windows EXE packaging: VERIFIED.
-- Project save/load + autosave + durable V42 checkpoints: MERGED; verification retained in CI history.
-- Review-first AI Plan / Review / Apply layer: IMPLEMENTED in current milestone; CI verification required.
-- 1B2 candidate/shot verification engine: NOT STARTED.
+- Project save/load + autosave + durable V42 checkpoints: VERIFIED and merged.
+- Review-first AI Plan / Review / Apply layer: VERIFIED and merged.
+- V42 1B2 parser/import + durable normalized plan: IMPLEMENTED in current milestone; CI verification required.
+- Local camera-cut verification inside 1B2 candidate ranges: NOT STARTED.
 - Gemini multi-key manager/failover reconstruction: NOT STARTED.
 - V42 Prompt 2–5 workflow engine: NOT STARTED.
 - Final FFmpeg/SmartCut export reconstruction: NOT STARTED.
 
 ## Architecture rule
 
-The timeline is the single source of truth. Manual edits and reviewed AI edits share the same validated Timeline Tool Registry. External AI can inspect state and propose a structured plan, but cannot bypass review with direct timeline mutation.
+The timeline is the single source of truth. Manual edits and reviewed AI edits share the same validated Timeline Tool Registry. 1B2 supplies candidate visual ranges and work order; later analysis must stay inside those ranges instead of scanning the full movie by default.
 
 ## Current milestone
 
-AI/MCP can submit a revision-bound plan containing validated timeline actions. The app displays the plan in the right-side AI Agent panel. Apply revalidates the plan and executes it atomically; Cancel changes nothing. Successful V42 plan application records workflow/checkpoint metadata.
+MiniCut can normalize 1B2 JSON, DOCX or text into local B/N/J/D units, work order and candidate timestamp ranges. The result is shown in the AI panel, persisted in the project workflow checkpoint, restored after restart, and exposed to AI only as compact structured state.
 
 ## Next technically justified action
 
-After AI Plan / Review / Apply CI passes:
+After 1B2 import CI passes:
 
-1. parse 1B2 into structured B/N/J units and candidate ranges,
-2. add local camera-cut detection only inside those candidate ranges,
-3. sample sparse frames and overlapping film SRT into compact evidence packets,
-4. reconstruct Gemini multi-key/failover against those packets,
-5. implement Prompt 2–5 orchestration against the shared timeline,
-6. reconstruct final FFmpeg/SmartCut export.
+1. add local shot/camera-cut detection constrained to the active 1B2 candidate ranges,
+2. generate representative start/middle/end frames per detected shot,
+3. attach overlapping film SRT text,
+4. build compact evidence packets per N/J unit,
+5. reconstruct Gemini multi-key/failover against those packets,
+6. implement Prompt 2–5 orchestration and final export.
