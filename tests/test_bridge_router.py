@@ -40,11 +40,11 @@ class BridgeRouterTests(unittest.TestCase):
         state = self.router.state()
         self.assertEqual(state["revision"], 0)
         self.assertEqual(state["playhead_ms"], 0)
-        self.assertIn("insert_clip", state["bridge_tools"])
-        self.assertIn("batch", state["bridge_tools"])
+        self.assertNotIn("insert_clip", state["bridge_tools"])
+        self.assertNotIn("batch", state["bridge_tools"])
         self.assertIn("propose_plan", state["bridge_tools"])
 
-    def test_insert_rejects_unimported_source(self):
+    def test_direct_insert_is_blocked_before_any_mutation(self):
         result = self.router.execute(
             {
                 "tool": "insert_clip",
@@ -58,7 +58,7 @@ class BridgeRouterTests(unittest.TestCase):
             }
         )
         self.assertFalse(result["ok"])
-        self.assertEqual(result["error"]["code"], "source_not_allowed")
+        self.assertEqual(result["error"]["code"], "review_required")
         self.assertEqual(self.doc.clips, [])
 
     def test_direct_external_mutation_requires_review(self):
