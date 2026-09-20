@@ -88,6 +88,19 @@ class TimelinePlanManager:
             return self._error("no_pending_plan", "Tidak ada AI plan yang menunggu.")
 
         plan = self.pending
+
+        if self.action_validator is not None:
+            for index, action in enumerate(plan.actions):
+                validation_error = self.action_validator(
+                    str(action["tool"]),
+                    dict(action.get("args") or {}),
+                )
+                if validation_error:
+                    return self._error(
+                        "plan_revalidation_failed",
+                        f"Action #{index} tidak lagi valid: {validation_error}",
+                    )
+
         result = self.registry.execute_batch(
             deepcopy(plan.actions),
             expected_revision=plan.expected_revision,
