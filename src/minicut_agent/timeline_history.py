@@ -46,6 +46,15 @@ class TimelineHistory:
         self._undo.pop()
         return True
 
+    def rollback_checkpoint(self) -> bool:
+        """Restore the newest checkpoint without creating a redo entry."""
+        if not self._undo:
+            return False
+        snapshot = self._undo.pop()
+        self._restore(snapshot)
+        self._redo.clear()
+        return True
+
     def undo(self) -> bool:
         if not self._undo:
             return False
