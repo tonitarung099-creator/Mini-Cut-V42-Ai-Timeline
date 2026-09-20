@@ -219,7 +219,6 @@ def load_1b2(path: str | Path) -> V42OneB2Plan:
 
     plan.source_path = str(source)
     plan.source_sha256 = digest
-    _finalize_plan(plan)
     return plan
 
 
@@ -281,6 +280,7 @@ def parse_registration_json(raw: Any) -> V42OneB2Plan:
         key=lambda item: (item[0], item[1]),
     )
     plan.work_queue = [unit_id for _, unit_id in ordered]
+    _finalize_plan(plan)
     return plan
 
 
@@ -374,6 +374,7 @@ def parse_1b2_text(text: str) -> V42OneB2Plan:
             for item in block.work_order:
                 _append_unique(plan.work_queue, item)
 
+    _finalize_plan(plan)
     return plan
 
 
