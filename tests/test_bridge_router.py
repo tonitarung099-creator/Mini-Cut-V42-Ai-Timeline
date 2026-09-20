@@ -61,7 +61,7 @@ class BridgeRouterTests(unittest.TestCase):
         self.assertEqual(result["error"]["code"], "source_not_allowed")
         self.assertEqual(self.doc.clips, [])
 
-    def test_insert_allowed_source_mutates_registry(self):
+    def test_direct_external_mutation_requires_review(self):
         result = self.router.execute(
             {
                 "tool": "insert_clip",
@@ -75,9 +75,11 @@ class BridgeRouterTests(unittest.TestCase):
                 },
             }
         )
-        self.assertTrue(result["ok"])
-        self.assertEqual(self.registry.revision, 1)
-        self.assertEqual(self.mutations, 1)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"]["code"], "review_required")
+        self.assertEqual(self.registry.revision, 0)
+        self.assertEqual(self.mutations, 0)
+        self.assertEqual(self.doc.clips, [])
 
     def test_seek_is_ui_command_not_timeline_revision(self):
         result = self.router.execute({"tool": "seek", "args": {"time_ms": 2500}})
@@ -141,7 +143,7 @@ class BridgeRouterTests(unittest.TestCase):
         self.assertEqual(result["error"]["code"], "source_not_allowed")
         self.assertIsNone(self.plan_manager.pending)
 
-    def test_batch_rejects_disallowed_source_before_mutation(self):
+    def test_direct_external_batch_requires_review(self):
         result = self.router.batch(
             {
                 "expected_revision": 0,
@@ -155,21 +157,12 @@ class BridgeRouterTests(unittest.TestCase):
                             "source_out_ms": 1000,
                             "timeline_start_ms": 0,
                         },
-                    },
-                    {
-                        "tool": "insert_clip",
-                        "args": {
-                            "source": "not-imported.mp4",
-                            "track_id": "A1",
-                            "source_in_ms": 0,
-                            "source_out_ms": 1000,
-                            "timeline_start_ms": 0,
-                        },
-                    },
+                    }
                 ],
             }
         )
         self.assertFalse(result["ok"])
+        self.assertEqual(result["error"]["code"], "review_required")
         self.assertEqual(self.doc.clips, [])
         self.assertEqual(self.registry.revision, 0)
 
