@@ -152,8 +152,14 @@ class GeminiKeyPool:
         record.failure_count += 1
         record.last_error = _safe_error(error, status_code)
 
-        if status_code in {400, 401, 403}:
+        if status_code in {401, 403}:
             record.disabled = True
+            record.cooldown_until = 0.0
+            return
+
+        if status_code == 400:
+            # A malformed request is normally not a key-health problem.
+            # Keep the key available so provider/schema bugs do not burn the pool.
             record.cooldown_until = 0.0
             return
 
