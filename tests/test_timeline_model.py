@@ -122,6 +122,60 @@ class TimelineDocumentTests(unittest.TestCase):
         self.assertEqual(len(removed), 2)
         self.assertEqual(doc.clips, [])
 
+    def test_preview_maps_timeline_to_trimmed_source_time(self):
+        doc = TimelineDocument.default()
+        clip = doc.insert_clip(
+            source="film.mp4",
+            track_id="V1",
+            source_in_ms=10000,
+            source_out_ms=30000,
+            timeline_start_ms=5000,
+            speed=2.0,
+        )
+        self.assertEqual(clip.source_position_at(5000), 10000)
+        self.assertEqual(clip.source_position_at(9000), 18000)
+        self.assertIs(doc.video_clip_at(9000), clip)
+
+    def test_preview_prefers_top_video_track(self):
+        doc = TimelineDocument.default()
+        lower = doc.insert_clip(
+            source="lower.mp4",
+            track_id="V1",
+            source_in_ms=0,
+            source_out_ms=10000,
+            timeline_start_ms=0,
+        )
+        upper = doc.insert_clip(
+            source="upper.mp4",
+            track_id="V2",
+            source_in_ms=0,
+            source_out_ms=5000,
+            timeline_start_ms=2000,
+        )
+        self.assertIs(doc.video_clip_at(1000), lower)
+        self.assertIs(doc.video_clip_at(3000), upper)
+        self.assertIs(doc.video_clip_at(8000), lower)
+
+    def test_hidden_video_track_is_not_previewed(self):
+        doc = TimelineDocument.default()
+        upper = doc.insert_clip(
+            source="upper.mp4",
+            track_id="V2",
+            source_in_ms=0,
+            source_out_ms=5000,
+            timeline_start_ms=0,
+        )
+        lower = doc.insert_clip(
+            source="lower.mp4",
+            track_id="V1",
+            source_in_ms=0,
+            source_out_ms=5000,
+            timeline_start_ms=0,
+        )
+        doc.track("V2").visible = False
+        self.assertIs(doc.video_clip_at(1000), lower)
+        self.assertIsNot(doc.video_clip_at(1000), upper)
+
     def test_history_cancel_checkpoint_removes_rejected_operation(self):
         doc = TimelineDocument.default()
         history = TimelineHistory(doc)
