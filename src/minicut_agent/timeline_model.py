@@ -285,6 +285,49 @@ class TimelineDocument:
         self._sort_clips()
         return targets
 
+    def set_linked_speed(self, clip_id: str, speed: float) -> list[TimelineClip]:
+        speed = float(speed)
+        if speed <= 0 or speed > 16:
+            raise ValueError("speed harus > 0 dan <= 16.")
+        targets = list(self.linked_clips(clip_id))
+        if any(clip.locked or self.track(clip.track_id).locked for clip in targets):
+            raise ValueError("Clip atau track terkait sedang dikunci.")
+        for clip in targets:
+            clip.speed = speed
+        self._sort_clips()
+        return targets
+
+    def set_clip_muted(self, clip_id: str, muted: bool) -> TimelineClip:
+        clip = self.clip(clip_id)
+        if clip.locked or self.track(clip.track_id).locked:
+            raise ValueError("Clip atau track sedang dikunci.")
+        clip.muted = bool(muted)
+        return clip
+
+    def set_clip_locked(self, clip_id: str, locked: bool) -> TimelineClip:
+        clip = self.clip(clip_id)
+        clip.locked = bool(locked)
+        return clip
+
+    def set_track_locked(self, track_id: str, locked: bool) -> TimelineTrack:
+        track = self.track(track_id)
+        track.locked = bool(locked)
+        return track
+
+    def set_track_visible(self, track_id: str, visible: bool) -> TimelineTrack:
+        track = self.track(track_id)
+        if track.kind == "audio":
+            raise ValueError("Audio memakai kontrol mute, bukan visibility.")
+        track.visible = bool(visible)
+        return track
+
+    def set_track_muted(self, track_id: str, muted: bool) -> TimelineTrack:
+        track = self.track(track_id)
+        if track.kind != "audio":
+            raise ValueError("Mute track hanya tersedia untuk audio.")
+        track.muted = bool(muted)
+        return track
+
     def toggle_track_lock(self, track_id: str) -> bool:
         track = self.track(track_id)
         track.locked = not track.locked
