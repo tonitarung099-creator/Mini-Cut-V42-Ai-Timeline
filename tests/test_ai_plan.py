@@ -85,6 +85,28 @@ class TimelinePlanManagerTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["error"]["code"], "invalid_plan")
 
+    def test_apply_revalidates_plan_before_mutation(self):
+        allowed = {"film.mp4"}
+
+        def validator(tool, args):
+            if tool == "insert_clip" and args.get("source") not in allowed:
+                return "source tidak lagi diizinkan"
+            return None
+
+        manager = TimelinePlanManager(
+            self.registry,
+            action_validator=validator,
+        )
+        self.assertTrue(manager.propose(self._plan())["ok"])
+        allowed.clear()
+
+        result = manager.apply()
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"]["code"], "plan_revalidation_failed")
+        self.assertEqual(self.doc.clips, [])
+        self.assertEqual(self.registry.revision, 0)
+        self.assertIsNotNone(manager.pending)
+
     def test_cancel_keeps_timeline_untouched(self):
         self.manager.propose(self._plan())
         result = self.manager.cancel()
