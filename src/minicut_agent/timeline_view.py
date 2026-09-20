@@ -11,11 +11,13 @@ class TimelineView(QWidget):
     seekRequested = Signal(int)
     clipSelected = Signal(str)
     clipMoveRequested = Signal(str, str, int)
+    clipTrimRequested = Signal(str, str, int)
 
     HEADER_WIDTH = 76
     RULER_HEIGHT = 28
     TRACK_HEIGHT = 48
     SNAP_MS = 100
+    TRIM_HANDLE_PX = 7
 
     def __init__(self, document: TimelineDocument, parent=None):
         super().__init__(parent)
@@ -25,6 +27,7 @@ class TimelineView(QWidget):
         self.selected_clip_id: str | None = None
         self._drag_clip_id: str | None = None
         self._drag_offset_x = 0
+        self._drag_mode: str | None = None
         self._press_pos: QPoint | None = None
         self.setMinimumHeight(self.RULER_HEIGHT + len(document.tracks) * self.TRACK_HEIGHT + 12)
         self.setMouseTracking(True)
@@ -37,6 +40,7 @@ class TimelineView(QWidget):
     def clear_selection(self) -> None:
         self.selected_clip_id = None
         self._drag_clip_id = None
+        self._drag_mode = None
         self.update()
 
     def set_playhead(self, milliseconds: int) -> None:
@@ -125,6 +129,20 @@ class TimelineView(QWidget):
                 Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
                 clip.label,
             )
+            if clip.id == self.selected_clip_id:
+                painter.fillRect(
+                    QRect(rect.left(), rect.top(), self.TRIM_HANDLE_PX, rect.height()),
+                    QColor("#f1f3f7"),
+                )
+                painter.fillRect(
+                    QRect(
+                        rect.right() - self.TRIM_HANDLE_PX + 1,
+                        rect.top(),
+                        self.TRIM_HANDLE_PX,
+                        rect.height(),
+                    ),
+                    QColor("#f1f3f7"),
+                )
 
         x = self._time_to_x(self.playhead_ms)
         painter.setPen(QPen(QColor("#f04f5f"), 2))
@@ -145,11 +163,18 @@ class TimelineView(QWidget):
                 self.selected_clip_id = clip.id
                 self._drag_clip_id = clip.id
                 self._drag_offset_x = pos.x() - rect.x()
+                if pos.x() - rect.left() <= self.TRIM_HANDLE_PX:
+                    self._drag_mode = "trim-left"
+                elif rect.right() - pos.x() <= self.TRIM_HANDLE_PX:
+                    self._drag_mode = "trim-right"
+                else:
+                    self._drag_mode = "move"
                 self.clipSelected.emit(clip.id)
                 self.update()
                 return
 
         self._drag_clip_id = None
+        self._drag_mode = None
         if pos.x() >= self.HEADER_WIDTH:
             milliseconds = self._x_to_time(pos.x())
             self.set_playhead(milliseconds)
@@ -165,10 +190,17 @@ class TimelineView(QWidget):
         pos = event.position().toPoint()
         if self._press_pos is not None and (pos - self._press_pos).manhattanLength() >= 4:
             clip = self.document.clip(self._drag_clip_id)
-            target_track = self._track_at_y(pos.y()) or clip.track_id
-            raw_start = self._x_to_time(pos.x() - self._drag_offset_x)
-            snapped_start = int(round(raw_start / self.SNAP_MS) * self.SNAP_MS)
-            self.clipMoveRequested.emit(clip.id, target_track, max(0, snapped_start))
+            if self._drag_mode in {"trim-left", "trim-right"}:
+                raw_time = self._x_to_time(pos.x())
+                snapped_time = int(round(raw_time / self.SNAP_MS) * self.SNAP_MS)
+                edge = "left" if self._drag_mode == "trim-left" else "right"
+                self.clipTrimRequested.emit(clip.id, edge, max(0, snapped_time))
+            else:
+                target_track = self._track_at_y(pos.y()) or clip.track_id
+                raw_start = self._x_to_time(pos.x() - self._drag_offset_x)
+                snapped_start = int(round(raw_start / self.SNAP_MS) * self.SNAP_MS)
+                self.clipMoveRequested.emit(clip.id, target_track, max(0, snapped_start))
 
         self._drag_clip_id = None
+        self._drag_mode = None
         self._press_pos = None
