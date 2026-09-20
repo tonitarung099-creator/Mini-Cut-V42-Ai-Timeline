@@ -510,7 +510,11 @@ def _unit_context_from_line(
     line: str,
     block: V42BlockSpec | None,
 ) -> V42UnitSpec | None:
-    match = re.match(r"^\s*[-*]?\s*([NJD]-\d{3,})\s*:", line, re.IGNORECASE)
+    match = re.match(
+        r"^\s*[-*]?\s*([NJD]-\d{3,})\s*(?::|→|->|—|–)\s*",
+        line,
+        re.IGNORECASE,
+    )
     if not match:
         return None
     unit = _ensure_unit(plan, match.group(1), block.id if block else None)
