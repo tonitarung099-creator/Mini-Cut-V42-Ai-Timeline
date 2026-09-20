@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .ai_plan import TimelinePlanManager
+from .ai_plan import TimelinePlan, TimelinePlanManager
 from .bridge import BridgeRouter, LocalTimelineBridge, QtBridgeDispatcher
 from .evidence_packets import (
     UnitEvidencePacket,
@@ -216,6 +216,7 @@ class MiniCutMainWindow(QMainWindow):
         self.plan_manager = TimelinePlanManager(
             self.tools,
             action_validator=self._validate_ai_plan_action,
+            plan_validator=self._validate_ai_plan,
         )
         self.media_durations: dict[str, int] = {}
         self.current_media: str | None = None
@@ -993,6 +994,40 @@ class MiniCutMainWindow(QMainWindow):
             return None
         return self.narration_timing_set.timings.get(str(unit_id).upper())
 
+    def _has_narration_a2(self, unit_id: str | None) -> bool:
+        if not unit_id:
+            return False
+        return any(
+            clip.unit_id == unit_id
+            and clip.track_id == "A2"
+            and clip.origin == "narration_audio"
+            for clip in self.document.clips
+        )
+
+    def _current_narration_identity(self, unit_id: str | None):
+        plan = self.v42_1b2_plan
+        if (
+            not unit_id
+            or plan is None
+            or unit_id not in plan.units
+            or plan.units[unit_id].kind != "narration"
+        ):
+            return None
+        timing = self._narration_timing(unit_id)
+        script_unit = (
+            None
+            if self.narration_script is None
+            else self.narration_script.units.get(unit_id)
+        )
+        if timing is None or script_unit is None:
+            return None
+        return {
+            "duration_ms": timing.duration_ms,
+            "source_in_ms": timing.source_in_ms,
+            "source_out_ms": timing.source_out_ms,
+            "script_sha256": self.narration_script.source_sha256,
+        }
+
     def _build_narration_audio_plan(self):
         if self.plan_manager.pending is not None:
             self.statusBar().showMessage(
@@ -1063,15 +1098,7 @@ class MiniCutMainWindow(QMainWindow):
             and unit_id in plan.units
             and plan.units[unit_id].kind == "narration"
         )
-        has_a2 = bool(
-            unit_id
-            and any(
-                clip.unit_id == unit_id
-                and clip.track_id == "A2"
-                and clip.origin == "narration_audio"
-                for clip in self.document.clips
-            )
-        )
+        has_a2 = self._has_narration_a2(unit_id)
         self.ai_plan_narration_audio.setEnabled(
             is_n
             and timing is not None
@@ -1561,6 +1588,39 @@ class MiniCutMainWindow(QMainWindow):
 
         unit = plan.units.get(unit_id)
         unit_context = dict(unit.fields) if unit is not None else {}
+        if unit is not None and unit.kind == "narration":
+            timing = self._narration_timing(unit_id)
+            script_unit = (
+                None
+                if self.narration_script is None
+                else self.narration_script.units.get(unit_id)
+            )
+            if timing is None or script_unit is None:
+                self.statusBar().showMessage(
+                    "Prompt 3: analisis audio narasi dan Prompt 1B1 harus siap "
+                    "sebelum Gemini memilih visual N."
+                )
+                self._refresh_gemini_verify_status()
+                return
+            unit_context.update(
+                {
+                    "prompt3_narration_text": script_unit.text,
+                    "prompt3_target_duration_ms": timing.duration_ms,
+                    "prompt3_target_duration_seconds": round(
+                        timing.duration_ms / 1000,
+                        3,
+                    ),
+                    "prompt3_visual_speed_default_and_max": 0.50,
+                    "prompt3_min_piece_duration_ms": 2000,
+                    "prompt3_order_rule": (
+                        "TANPA ACAK — KRONOLOGIS/NATURAL; source timestamp "
+                        "berikutnya tidak boleh lebih awal"
+                    ),
+                    "prompt3_audio_rule": (
+                        "film audio muted; narration A2 timing authoritative"
+                    ),
+                }
+            )
         worker = GeminiVerificationWorker(
             self.gemini_key_pool,
             packet,
@@ -1606,6 +1666,7 @@ class MiniCutMainWindow(QMainWindow):
                     "srt_sha256": packet.srt_sha256,
                     "shots": len(packet.shots),
                     "frames": packet.frame_count,
+                    "narration": self._current_narration_identity(result.unit_id),
                 },
             },
         )
@@ -1675,6 +1736,8 @@ class MiniCutMainWindow(QMainWindow):
             and identity.get("srt_sha256") == packet.srt_sha256
             and int(identity.get("shots", -1)) == len(packet.shots)
             and int(identity.get("frames", -1)) == packet.frame_count
+            and identity.get("narration")
+            == self._current_narration_identity(unit_id)
         )
 
     def _refresh_gemini_verify_status(self):
@@ -1687,8 +1750,21 @@ class MiniCutMainWindow(QMainWindow):
         unit_id = self._shot_unit_id()
         packet = self._evidence_checkpoint_packet(unit_id)
         key_summary = self.gemini_key_pool.summary()
+        plan = self.v42_1b2_plan
+        is_narration = bool(
+            unit_id
+            and plan is not None
+            and unit_id in plan.units
+            and plan.units[unit_id].kind == "narration"
+        )
+        narration_ready = (
+            not is_narration
+            or self._current_narration_identity(unit_id) is not None
+        )
         self.ai_verify_gemini.setEnabled(
-            packet is not None and key_summary["ready"] > 0
+            packet is not None
+            and key_summary["ready"] > 0
+            and narration_ready
         )
         verification = self._gemini_checkpoint_verification(unit_id)
 
@@ -1697,6 +1773,10 @@ class MiniCutMainWindow(QMainWindow):
         elif packet is None:
             self.ai_gemini_verify_status.setText(
                 f"Gemini verify {unit_id}: butuh evidence"
+            )
+        elif is_narration and not narration_ready:
+            self.ai_gemini_verify_status.setText(
+                f"Gemini verify {unit_id}: butuh timing audio Prompt 3"
             )
         elif verification is None:
             self.ai_gemini_verify_status.setText(
@@ -1743,6 +1823,24 @@ class MiniCutMainWindow(QMainWindow):
             self._refresh_timeline_plan_status()
             return
 
+        unit = plan.units.get(unit_id)
+        narration_target = None
+        if unit is not None and unit.kind == "narration":
+            timing = self._narration_timing(unit_id)
+            if timing is None:
+                self.statusBar().showMessage(
+                    "Prompt 3: timing audio narasi belum tersedia."
+                )
+                self._refresh_timeline_plan_status()
+                return
+            if not self._has_narration_a2(unit_id):
+                self.statusBar().showMessage(
+                    "Prompt 3: pasang audio narasi N di A2 terlebih dahulu."
+                )
+                self._refresh_timeline_plan_status()
+                return
+            narration_target = timing.duration_ms
+
         try:
             payload = build_verified_timeline_plan(
                 plan=plan,
@@ -1750,6 +1848,7 @@ class MiniCutMainWindow(QMainWindow):
                 verification=verification,
                 document=self.document,
                 expected_revision=self.tools.revision,
+                narration_target_duration_ms=narration_target,
             )
         except V42PlanBuildError as exc:
             self.statusBar().showMessage(f"AI plan tidak dibuat: {exc}")
@@ -1791,11 +1890,26 @@ class MiniCutMainWindow(QMainWindow):
         current = self._gemini_checkpoint_is_current(unit_id)
         pending = self.plan_manager.pending
 
+        plan = self.v42_1b2_plan
+        is_narration = bool(
+            unit_id
+            and plan is not None
+            and unit_id in plan.units
+            and plan.units[unit_id].kind == "narration"
+        )
+        prompt3_ready = (
+            not is_narration
+            or (
+                self._narration_timing(unit_id) is not None
+                and self._has_narration_a2(unit_id)
+            )
+        )
         can_build = (
             unit_id is not None
             and verification is not None
             and current
             and pending is None
+            and prompt3_ready
         )
         self.ai_build_timeline_plan.setEnabled(can_build)
 
@@ -1808,6 +1922,10 @@ class MiniCutMainWindow(QMainWindow):
         elif verification is None:
             self.ai_timeline_plan_status.setText(
                 f"Timeline plan {unit_id}: butuh verifikasi Gemini"
+            )
+        elif is_narration and not prompt3_ready:
+            self.ai_timeline_plan_status.setText(
+                f"Timeline plan {unit_id}: pasang audio A2 dulu"
             )
         elif not current:
             self.ai_timeline_plan_status.setText(
@@ -1874,6 +1992,38 @@ class MiniCutMainWindow(QMainWindow):
                 return "Rentang audio plan berbeda dari safe-padding waveform."
             return None
 
+        if origin == "prompt3_visual":
+            unit_id = str(args.get("unit_id", "")).strip().upper()
+            plan = self.v42_1b2_plan
+            if plan is None or unit_id not in plan.units:
+                return "Visual Prompt 3 tidak memiliki unit V42 yang valid."
+            unit = plan.units[unit_id]
+            if unit.kind != "narration" or str(args.get("track_id", "")) != "V2":
+                return "Visual Prompt 3 N hanya boleh ditempatkan di V2."
+            packet = self._evidence_checkpoint_packet(unit_id)
+            if packet is None or source != packet.source:
+                return "Source visual Prompt 3 berbeda dari evidence."
+            try:
+                source_in = int(args["source_in_ms"])
+                source_out = int(args["source_out_ms"])
+                speed = float(args["speed"])
+            except (KeyError, TypeError, ValueError):
+                return "Parameter visual Prompt 3 tidak valid."
+            if not 0 < speed <= 0.50:
+                return "Visual narasi Prompt 3 wajib memakai speed >0 dan <=0,50×."
+            if not bool(args.get("muted", False)):
+                return "Audio asli film pada visual narasi wajib dimatikan."
+            inside_evidence = any(
+                shot.start_ms <= source_in < source_out <= shot.end_ms
+                for shot in packet.shots
+            )
+            if not inside_evidence:
+                return "Rentang visual Prompt 3 berada di luar shot evidence."
+            timeline_duration = int(round((source_out - source_in) / speed))
+            if timeline_duration < 2000:
+                return "Setiap potongan visual Prompt 3 wajib minimal 2,00 detik."
+            return None
+
         if origin != "gemini_verified":
             return None
 
@@ -1915,6 +2065,72 @@ class MiniCutMainWindow(QMainWindow):
         if not inside_evidence:
             return "Rentang source action berada di luar shot evidence."
 
+        return None
+
+    def _validate_ai_plan(self, plan: TimelinePlan) -> str | None:
+        if plan.created_by != "prompt3-visual-fit":
+            return None
+
+        unit_id = (plan.unit_id or "").strip().upper()
+        timing = self._narration_timing(unit_id)
+        if timing is None:
+            return "Timing audio narasi Prompt 3 tidak lagi tersedia."
+        if not self._has_narration_a2(unit_id):
+            return "Audio narasi A2 unit ini tidak lagi tersedia."
+
+        visual_actions = [
+            action
+            for action in plan.actions
+            if action.get("tool") == "insert_clip"
+            and str(action.get("args", {}).get("origin", "")) == "prompt3_visual"
+        ]
+        if not visual_actions:
+            return "Plan Prompt 3 tidak memiliki visual V2."
+
+        total = 0
+        previous_source = -1
+        first_timeline_start = None
+        for action in visual_actions:
+            args = dict(action.get("args") or {})
+            try:
+                source_in = int(args["source_in_ms"])
+                source_out = int(args["source_out_ms"])
+                timeline_start = int(args["timeline_start_ms"])
+                speed = float(args["speed"])
+            except (KeyError, TypeError, ValueError):
+                return "Plan Prompt 3 memiliki parameter clip yang tidak valid."
+            if source_in < previous_source:
+                return "Plan Prompt 3 kembali ke timestamp sumber yang lebih awal."
+            previous_source = source_in
+            duration = int(round((source_out - source_in) / speed))
+            if duration < 2000:
+                return "Plan Prompt 3 memiliki potongan di bawah 2,00 detik."
+            if speed <= 0 or speed > 0.50:
+                return "Plan Prompt 3 memiliki speed di luar aturan maksimum 0,50×."
+            if not bool(args.get("muted", False)):
+                return "Plan Prompt 3 mengaktifkan audio asli film."
+            total += duration
+            if first_timeline_start is None:
+                first_timeline_start = timeline_start
+
+        if total != timing.duration_ms:
+            return (
+                "Durasi seluruh visual Prompt 3 tidak sama dengan audio A2 terbaru: "
+                f"{total} ms vs {timing.duration_ms} ms."
+            )
+
+        layout = self._current_region_layout()
+        if layout is None:
+            return "Layout V42 tidak tersedia untuk memvalidasi Prompt 3."
+        try:
+            region = layout.region(unit_id)
+        except KeyError:
+            return f"Region V42 {unit_id} tidak ditemukan."
+        if first_timeline_start != region.start_ms:
+            return (
+                "Posisi awal visual Prompt 3 tidak lagi cocok dengan region N: "
+                f"{first_timeline_start} ms vs {region.start_ms} ms."
+            )
         return None
 
     def _refresh_ai_plan(self):
