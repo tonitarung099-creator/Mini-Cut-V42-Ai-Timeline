@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 from uuid import uuid4
 
-from PySide6.QtCore import QElapsedTimer, Qt, QTimer, QUrl
+from PySide6.QtCore import QElapsedTimer, QThread, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
 from .ai_plan import TimelinePlanManager
 from .bridge import BridgeRouter, LocalTimelineBridge, QtBridgeDispatcher
 from .project_store import apply_project, load_project, save_project as save_project_file
+from .shot_detection import UnitShotAnalysis, analyze_unit_candidates
 from .timeline_history import TimelineHistory
 from .timeline_model import TimelineDocument
 from .timeline_tools import TimelineToolRegistry
@@ -60,6 +61,35 @@ QSlider::handle:horizontal { width: 12px; margin: -5px 0; border-radius: 6px; ba
 """
 
 
+class ShotDetectionWorker(QThread):
+    resultReady = Signal(object)
+    errorRaised = Signal(str)
+
+    def __init__(
+        self,
+        plan: V42OneB2Plan,
+        unit_id: str,
+        source: str,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.plan = plan
+        self.unit_id = unit_id
+        self.source = source
+
+    def run(self):
+        try:
+            result = analyze_unit_candidates(
+                self.plan,
+                self.unit_id,
+                self.source,
+            )
+        except Exception as exc:
+            self.errorRaised.emit(str(exc))
+            return
+        self.resultReady.emit(result)
+
+
 class MiniCutMainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -79,6 +109,7 @@ class MiniCutMainWindow(QMainWindow):
         self.project_path: Path | None = None
         self.workflow_state = V42WorkflowState()
         self.v42_1b2_plan: V42OneB2Plan | None = None
+        self._shot_worker: ShotDetectionWorker | None = None
         self._loading_project = False
 
         # Preview has two contexts: source-bin preview and composed timeline preview.
@@ -313,6 +344,11 @@ class MiniCutMainWindow(QMainWindow):
         self.ai_1b2_status.setObjectName("StatusPill")
         self.ai_import_1b2 = QPushButton("Import 1B2")
         self.ai_import_1b2.clicked.connect(self.import_1b2_plan)
+        self.ai_shot_status = QLabel("Shot lokal: belum dianalisis")
+        self.ai_shot_status.setObjectName("StatusPill")
+        self.ai_detect_shots = QPushButton("Pecah Kandidat per Kamera")
+        self.ai_detect_shots.setEnabled(False)
+        self.ai_detect_shots.clicked.connect(self._analyze_next_1b2_unit)
 
         self.ai_input = QPlainTextEdit()
         self.ai_input.setPlaceholderText(
@@ -344,6 +380,8 @@ class MiniCutMainWindow(QMainWindow):
         layout.addWidget(self.ai_unit)
         layout.addWidget(self.ai_1b2_status)
         layout.addWidget(self.ai_import_1b2)
+        layout.addWidget(self.ai_shot_status)
+        layout.addWidget(self.ai_detect_shots)
         layout.addWidget(self.ai_input)
         layout.addWidget(QLabel("AI Plan / Review"))
         layout.addWidget(self.ai_plan_view)
@@ -411,6 +449,7 @@ class MiniCutMainWindow(QMainWindow):
             },
         )
         self._refresh_1b2_status()
+        self._refresh_shot_status()
 
         summary = plan.summary()
         message = (
@@ -443,6 +482,7 @@ class MiniCutMainWindow(QMainWindow):
         except (KeyError, TypeError, ValueError):
             self.v42_1b2_plan = None
         self._refresh_1b2_status()
+        self._refresh_shot_status()
 
     def _next_1b2_unit_id(self) -> str | None:
         plan = self.v42_1b2_plan
@@ -486,6 +526,170 @@ class MiniCutMainWindow(QMainWindow):
             f"{summary['candidate_ranges']} kandidat · "
             f"berikutnya {next_unit}"
         )
+        self._refresh_shot_status()
+
+    def _analysis_source_path(self) -> str | None:
+        selected = self.media_list.selectedItems()
+        if selected:
+            source = selected[0].data(Qt.ItemDataRole.UserRole)
+            if source:
+                return str(source)
+
+        sources = sorted(self._allowed_bridge_sources())
+        if len(sources) == 1:
+            return sources[0]
+        return None
+
+    def _shot_unit_id(self) -> str | None:
+        plan = self.v42_1b2_plan
+        if plan is None:
+            return None
+
+        active = self.workflow_state.active_unit
+        if active and active in plan.units:
+            unit = plan.units[active]
+            if unit.kind in {"narration", "anchor"}:
+                status = self.workflow_state.units.get(active, {}).get(
+                    "status", "pending"
+                )
+                if status != "locked":
+                    return active
+        return self._next_1b2_unit_id()
+
+    def _analyze_next_1b2_unit(self):
+        if self._shot_worker is not None:
+            self.statusBar().showMessage("Deteksi shot lokal masih berjalan.")
+            return
+
+        plan = self.v42_1b2_plan
+        if plan is None:
+            self.statusBar().showMessage("Import 1B2 terlebih dahulu.")
+            return
+
+        unit_id = self._shot_unit_id()
+        if unit_id is None:
+            self.statusBar().showMessage("Tidak ada unit N/J 1B2 yang menunggu analisis.")
+            return
+
+        source = self._analysis_source_path()
+        if source is None:
+            self.statusBar().showMessage(
+                "Pilih film sumber di Media Bin. Jika hanya ada satu media, MiniCut akan memilih otomatis."
+            )
+            return
+        if not Path(source).is_file():
+            self.statusBar().showMessage(f"Film sumber tidak ditemukan: {source}")
+            return
+
+        self.workflow_state.active_unit = unit_id
+        unit = plan.units[unit_id]
+        if unit.block_id:
+            self.workflow_state.active_block = unit.block_id
+
+        worker = ShotDetectionWorker(plan, unit_id, source, parent=self)
+        worker.resultReady.connect(self._shot_analysis_ready)
+        worker.errorRaised.connect(self._shot_analysis_error)
+        worker.finished.connect(self._shot_worker_finished)
+        self._shot_worker = worker
+
+        self.ai_detect_shots.setEnabled(False)
+        self.ai_shot_status.setText(f"Shot lokal: menganalisis {unit_id}…")
+        self.statusBar().showMessage(
+            f"Deteksi pergantian kamera lokal untuk {unit_id}…"
+        )
+        worker.start()
+
+    def _shot_analysis_ready(self, result: UnitShotAnalysis):
+        plan = self.v42_1b2_plan
+        if plan is None:
+            return
+
+        unit = plan.units.get(result.unit_id)
+        block_id = unit.block_id if unit is not None else None
+        self.workflow_state.active_unit = result.unit_id
+        if block_id:
+            self.workflow_state.active_block = block_id
+
+        self.workflow_state.set_unit_status(
+            result.unit_id,
+            "working",
+            block_id=block_id,
+            timeline_revision=self.tools.revision,
+            note=(
+                f"Candidate 1B2 dipecah lokal menjadi {result.shot_count} shot."
+            ),
+        )
+        self.record_v42_checkpoint(
+            f"shots-{result.unit_id}",
+            block_id=block_id,
+            unit_id=result.unit_id,
+            payload={
+                "analysis": result.to_dict(),
+                "one_b2_source_sha256": plan.source_sha256,
+            },
+        )
+        self._refresh_shot_status()
+        summary = result.summary()
+        self.statusBar().showMessage(
+            f"{result.unit_id}: {summary['candidate_ranges']} candidate range → "
+            f"{summary['shots']} shot lokal."
+        )
+
+    def _shot_analysis_error(self, message: str):
+        self.ai_shot_status.setText("Shot lokal: gagal")
+        self.statusBar().showMessage(f"Deteksi shot gagal: {message}")
+
+    def _shot_worker_finished(self):
+        worker = self._shot_worker
+        self._shot_worker = None
+        if worker is not None:
+            worker.deleteLater()
+        self._refresh_shot_status()
+
+    def _shot_checkpoint_analysis(
+        self,
+        unit_id: str | None,
+    ) -> UnitShotAnalysis | None:
+        if not unit_id:
+            return None
+        checkpoint = self.workflow_state.checkpoints.get(f"shots-{unit_id}")
+        if not isinstance(checkpoint, dict):
+            return None
+        payload = checkpoint.get("payload")
+        if not isinstance(payload, dict):
+            return None
+        raw = payload.get("analysis")
+        if not isinstance(raw, dict):
+            return None
+        try:
+            return UnitShotAnalysis.from_dict(raw)
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    def _refresh_shot_status(self):
+        if not hasattr(self, "ai_shot_status"):
+            return
+
+        running = self._shot_worker is not None
+        unit_id = self._shot_unit_id()
+        analysis = self._shot_checkpoint_analysis(unit_id)
+        if running:
+            self.ai_detect_shots.setEnabled(False)
+            return
+
+        self.ai_detect_shots.setEnabled(
+            self.v42_1b2_plan is not None and unit_id is not None
+        )
+        if unit_id is None:
+            self.ai_shot_status.setText("Shot lokal: belum ada unit aktif")
+        elif analysis is None:
+            self.ai_shot_status.setText(f"Shot lokal {unit_id}: belum dianalisis")
+        else:
+            summary = analysis.summary()
+            self.ai_shot_status.setText(
+                f"Shot lokal {unit_id}: "
+                f"{summary['candidate_ranges']} kandidat → {summary['shots']} shot"
+            )
 
     def _start_local_bridge(self):
         try:
@@ -643,6 +847,14 @@ class MiniCutMainWindow(QMainWindow):
                     "summary": self.v42_1b2_plan.summary(),
                     "work_queue": list(self.v42_1b2_plan.work_queue),
                     "source_sha256": self.v42_1b2_plan.source_sha256,
+                    "active_unit": self._shot_unit_id(),
+                    "shot_summary": (
+                        None
+                        if self._shot_checkpoint_analysis(self._shot_unit_id()) is None
+                        else self._shot_checkpoint_analysis(
+                            self._shot_unit_id()
+                        ).summary()
+                    ),
                 }
             ),
             "imported_sources": sorted(self._allowed_bridge_sources()),
@@ -1328,6 +1540,8 @@ class MiniCutMainWindow(QMainWindow):
         assert isinstance(self.workflow_state, V42WorkflowState)
         assert self.v42_1b2_plan is None
         assert self.ai_1b2_status is not None
+        assert self.ai_shot_status is not None
+        assert self.ai_detect_shots is not None
         assert self._timeline_timer.interval() == 33
         self.statusBar().showMessage("SELF TEST PASS")
 
