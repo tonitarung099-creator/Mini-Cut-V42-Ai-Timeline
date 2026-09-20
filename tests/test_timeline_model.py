@@ -303,6 +303,7 @@ class TimelineDocumentTests(unittest.TestCase):
             source_out_ms=1000,
             timeline_start_ms=0,
         )
+        history.commit_checkpoint()
         self.assertEqual(len(doc.clips), 1)
 
         self.assertTrue(history.undo())
