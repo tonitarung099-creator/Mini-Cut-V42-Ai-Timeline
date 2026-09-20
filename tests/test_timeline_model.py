@@ -122,6 +122,68 @@ class TimelineDocumentTests(unittest.TestCase):
         self.assertEqual(len(removed), 2)
         self.assertEqual(doc.clips, [])
 
+    def test_linked_left_trim_keeps_video_audio_aligned(self):
+        doc = TimelineDocument.default()
+        video = doc.insert_clip(
+            source="film.mp4",
+            track_id="V1",
+            source_in_ms=1000,
+            source_out_ms=11000,
+            timeline_start_ms=5000,
+            speed=2.0,
+            group_id="g1",
+        )
+        audio = doc.insert_clip(
+            source="film.mp4",
+            track_id="A1",
+            source_in_ms=1000,
+            source_out_ms=11000,
+            timeline_start_ms=5000,
+            speed=2.0,
+            group_id="g1",
+        )
+        doc.trim_linked(video.id, edge="left", timeline_ms=7000)
+        self.assertEqual(video.timeline_start_ms, 7000)
+        self.assertEqual(audio.timeline_start_ms, 7000)
+        self.assertEqual(video.source_in_ms, 5000)
+        self.assertEqual(audio.source_in_ms, 5000)
+
+    def test_linked_right_trim_keeps_video_audio_aligned(self):
+        doc = TimelineDocument.default()
+        video = doc.insert_clip(
+            source="film.mp4",
+            track_id="V1",
+            source_in_ms=1000,
+            source_out_ms=11000,
+            timeline_start_ms=5000,
+            group_id="g1",
+        )
+        audio = doc.insert_clip(
+            source="film.mp4",
+            track_id="A1",
+            source_in_ms=1000,
+            source_out_ms=11000,
+            timeline_start_ms=5000,
+            group_id="g1",
+        )
+        doc.trim_linked(video.id, edge="right", timeline_ms=9000)
+        self.assertEqual(video.source_out_ms, 5000)
+        self.assertEqual(audio.source_out_ms, 5000)
+        self.assertEqual(video.timeline_end_ms, 9000)
+        self.assertEqual(audio.timeline_end_ms, 9000)
+
+    def test_trim_rejects_position_outside_clip(self):
+        doc = TimelineDocument.default()
+        clip = doc.insert_clip(
+            source="film.mp4",
+            track_id="V1",
+            source_in_ms=0,
+            source_out_ms=5000,
+            timeline_start_ms=1000,
+        )
+        with self.assertRaises(ValueError):
+            doc.trim_linked(clip.id, edge="right", timeline_ms=7000)
+
     def test_preview_maps_timeline_to_trimmed_source_time(self):
         doc = TimelineDocument.default()
         clip = doc.insert_clip(
