@@ -27,9 +27,9 @@
 - Narration SRT → N-unit monotonic mapper: VERIFIED and merged.
 - Local FFmpeg waveform/silence safe-padding analysis: VERIFIED and merged.
 - Review-first A2 narration audio placement: VERIFIED and merged.
-- Prompt 3 visual-duration fitting to authoritative A2: IMPLEMENTED in current milestone; CI verification required.
+- Prompt 3 visual-duration fitting to authoritative A2: VERIFIED and merged.
 - Full Prompt 2 anchor dialog/action/campuran orchestration: NOT STARTED.
-- Targeted replace/revision of an existing unit: NOT STARTED.
+- Targeted single-visual Prompt 3 replacement: IMPLEMENTED in current milestone; CI verification required.
 - Prompt 4 block auditor: NOT STARTED.
 - Prompt 5/final FFmpeg/SmartCut export reconstruction: NOT STARTED.
 
@@ -46,17 +46,17 @@ Prompt 3 narration timing is local and evidence-based:
 
 ## Current milestone
 
-Narration audio timing is already verified. The current branch makes that timing authoritative for N visuals. Gemini receives the final narration text and A2 duration but only makes semantic keep/trim/reject decisions. Local MiniCut then fits verified source ranges under V42: chronological source order, <=0.50x speed, >=2.00s per final piece, film audio muted, and exact equality between total V2 duration and safe-padded A2 duration. Impossible fits become needs_revision rather than speeding above 0.50x.
+Prompt 3 core visual fitting is verified. The current branch adds targeted revision of one selected N visual. MiniCut constrains replacement candidates to the safe source-time window between the selected clip's neighboring N visuals, rejects source reuse, and fits the replacement to the exact old timeline-slot duration under the same <=0.50x / >=2.00s / muted rules. The generated plan deletes exactly one target clip and inserts only its replacement; other N/J clips and A2 remain untouched.
 
-Prompt 3 visual plans receive whole-plan revalidation. Immediately before Apply, MiniCut rebuilds the deterministic expected actions from current evidence, Gemini checkpoint, narration timing and timeline state; the pending actions must still match exactly.
+Targeted revision is review-first and deterministic. Before Apply, the expected replacement plan is rebuilt from the current timeline, evidence and Gemini checkpoint; stale or altered actions are rejected.
 
 ## Next technically justified action
 
 After this milestone passes CI:
 
-1. add a real freeze/hold timeline primitive with correct preview/export semantics;
-2. parse/normalize Prompt 1B2 phrase-function metadata (VISUAL PRESISI / HANDOFF / CAMPURAN) into structured fields;
-3. validate N→J handoff and protect J core moments during candidate selection;
-4. add targeted replacement of one faulty visual inside an existing N region;
-5. implement Prompt 2 Jangkar dialog/action/campuran orchestration;
-6. implement Prompt 4 block audit and Prompt 5/final export.
+1. parse/normalize Prompt 1B2 phrase-function metadata (VISUAL PRESISI / HANDOFF / CAMPURAN) into structured fields;
+2. validate N→J handoff and protect J core moments during candidate selection/revision;
+3. add a real freeze/hold timeline primitive with correct preview/export semantics;
+4. implement Prompt 2 Jangkar dialog/action/campuran orchestration;
+5. implement Prompt 4 block audit;
+6. implement Prompt 5/final export.
