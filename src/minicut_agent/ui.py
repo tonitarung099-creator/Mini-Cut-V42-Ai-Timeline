@@ -239,6 +239,7 @@ class MiniCutMainWindow(QMainWindow):
         self.timeline.seekRequested.connect(self._timeline_seek)
         self.timeline.clipSelected.connect(self._clip_selected)
         self.timeline.clipMoveRequested.connect(self._move_clip_requested)
+        self.timeline.clipTrimRequested.connect(self._trim_clip_requested)
 
     def _build_ai_dock(self):
         dock = QDockWidget("AI Agent", self)
@@ -387,6 +388,24 @@ class MiniCutMainWindow(QMainWindow):
             return
         self._clip_selected(clip_id)
         self._timeline_changed("Clip digeser.")
+
+    def _trim_clip_requested(self, clip_id: str, edge: str, timeline_ms: int):
+        try:
+            self.history.checkpoint()
+            self.document.trim_linked(
+                clip_id,
+                edge=edge,
+                timeline_ms=timeline_ms,
+            )
+        except (ValueError, KeyError) as exc:
+            self.history.cancel_checkpoint()
+            self.statusBar().showMessage(str(exc))
+            self._refresh_edit_actions()
+            return
+
+        self._clip_selected(clip_id)
+        side = "kiri" if edge == "left" else "kanan"
+        self._timeline_changed(f"Trim {side} berhasil.")
 
     def undo_timeline(self):
         if self.history.undo():
