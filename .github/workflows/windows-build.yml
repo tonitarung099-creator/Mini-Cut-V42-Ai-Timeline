@@ -18,6 +18,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+      - name: Verify archived baseline
+        run: python scripts/verify_baseline_layout.py
       - name: Restore editable baseline source
         run: python scripts/unpack_baseline_source.py --force
       - name: Install dependencies
