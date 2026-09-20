@@ -39,6 +39,13 @@ class TimelineHistory:
             del self._undo[0]
         self._redo.clear()
 
+    def cancel_checkpoint(self) -> bool:
+        """Discard the most recent pre-operation checkpoint after a rejected no-op."""
+        if not self._undo:
+            return False
+        self._undo.pop()
+        return True
+
     def undo(self) -> bool:
         if not self._undo:
             return False
